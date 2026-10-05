@@ -1540,6 +1540,93 @@ def _decode_block_records(bytes block_bytes, long64 count, ReadPlan plan):
         yield _exec_plan(c, plan)
 
 
+cdef object _read_one_from_bytesio(fo, ReadPlan plan):
+    """Decode one datum from a BytesIO at its current position and advance
+    the position past it (or past the bytes consumed before an error).
+
+    getvalue() shares the buffer of an unmodified BytesIO; getbuffer() would
+    export a writable view and force a copy of the whole buffer first."""
+    cdef bytes data = fo.getvalue()
+    cdef Cursor c = _cursor_for_bytes(data)
+    c.pos = fo.tell()
+    try:
+        return _exec_plan(c, plan)
+    finally:
+        fo.seek(c.pos)
+
+
+# (writer_schema, reader_schema, options) -> plan, keyed by object identity.
+# Entries keep references to the schema objects so an id cannot be reused by
+# a different object while it is cached.  When full, the oldest entry is
+# evicted (dicts iterate in insertion order).  Each entry also records the
+# LOGICAL_READERS functions the plan captured, so replacing a registered
+# reader invalidates the entry on its next use, as the generic reader would
+# see the replacement immediately.
+cdef dict _SCHEMALESS_PLANS = {}
+cdef Py_ssize_t _SCHEMALESS_PLANS_MAX = int(
+    os.environ.get("FASTAVRO_SCHEMALESS_PLAN_CACHE", "2048")
+)
+
+
+def set_schemaless_plan_cache_size(size):
+    """Set the number of compiled schemaless plans kept; returns the old size."""
+    global _SCHEMALESS_PLANS_MAX
+    previous = _SCHEMALESS_PLANS_MAX
+    _SCHEMALESS_PLANS_MAX = max(0, int(size))
+    while len(_SCHEMALESS_PLANS) > _SCHEMALESS_PLANS_MAX:
+        del _SCHEMALESS_PLANS[next(iter(_SCHEMALESS_PLANS))]
+    return previous
+
+
+def schemaless_plan_cache_info():
+    return {"size": len(_SCHEMALESS_PLANS), "capacity": _SCHEMALESS_PLANS_MAX}
+
+
+cdef list _logical_readers_used(ReadPlan plan, list out, set seen):
+    """(key, function) pairs captured by the plan tree, for cache validation."""
+    if plan is None or id(plan) in seen:
+        return out
+    seen.add(id(plan))
+    if plan.logical_fn is not None:
+        out.append((extract_logical_type(plan.writer_schema), plan.logical_fn))
+    _logical_readers_used(plan.child, out, seen)
+    for sub in plan.branches or ():
+        _logical_readers_used(<ReadPlan>sub, out, seen)
+    for sub in plan.field_plans or ():
+        _logical_readers_used(<ReadPlan>sub, out, seen)
+    return out
+
+
+cdef ReadPlan _schemaless_plan(writer_schema, reader_schema, dict named_schemas, dict options):
+    cdef ReadPlan plan
+    key = (
+        id(writer_schema),
+        _ref_key(reader_schema),
+        options["return_record_name"],
+        options["return_record_name_override"],
+        options["handle_unicode_errors"],
+        options["return_named_type"],
+        options["return_named_type_override"],
+    )
+    entry = _SCHEMALESS_PLANS.get(key)
+    if entry is not None and entry[0] is writer_schema and entry[1] is reader_schema:
+        for logical_key, fn in <list>entry[3]:
+            if LOGICAL_READERS.get(logical_key) is not fn:
+                break
+        else:
+            return <ReadPlan>entry[2]
+        del _SCHEMALESS_PLANS[key]
+    plan = _build_plan(writer_schema, reader_schema, named_schemas, options, {})
+    if _SCHEMALESS_PLANS_MAX <= 0:
+        return plan
+    while len(_SCHEMALESS_PLANS) >= _SCHEMALESS_PLANS_MAX:
+        del _SCHEMALESS_PLANS[next(iter(_SCHEMALESS_PLANS))]
+    _SCHEMALESS_PLANS[key] = (
+        writer_schema, reader_schema, plan, _logical_readers_used(plan, [], set())
+    )
+    return plan
+
+
 def _iter_avro_records(
     fo,
     header,
@@ -1813,10 +1900,11 @@ cpdef schemaless_reader(
         reader_schema = None
 
     named_schemas = _default_named_schemas()
-    writer_schema = parse_schema(writer_schema, named_schemas["writer"])
+    parsed_writer_schema = parse_schema(writer_schema, named_schemas["writer"])
 
+    parsed_reader_schema = None
     if reader_schema:
-        reader_schema = parse_schema(reader_schema, named_schemas["reader"])
+        parsed_reader_schema = parse_schema(reader_schema, named_schemas["reader"])
 
     options = {
         "return_record_name": return_record_name,
@@ -1825,6 +1913,25 @@ cpdef schemaless_reader(
         "return_named_type": return_named_type,
         "return_named_type_override": return_named_type_override,
     }
+
+    # Fast path: the input is in memory and the schemas were already parsed
+    # (so the compiled plan can be cached by identity across calls).  Any
+    # other input keeps the generic reader.
+    if (
+        _READ_PLAN_ENABLED
+        and isinstance(fo, BytesIO)
+        and parsed_writer_schema is writer_schema
+        and (parsed_reader_schema is None or parsed_reader_schema is reader_schema)
+    ):
+        return _read_one_from_bytesio(
+            fo,
+            _schemaless_plan(
+                parsed_writer_schema, parsed_reader_schema, named_schemas, options
+            ),
+        )
+
+    writer_schema = parsed_writer_schema
+    reader_schema = parsed_reader_schema
     return _read_data(
         fo,
         writer_schema,

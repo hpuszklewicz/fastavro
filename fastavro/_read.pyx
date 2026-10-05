@@ -1523,6 +1523,23 @@ cdef int _skip_plan(Cursor c, ReadPlan p) except -1:
     return 0
 
 
+cdef Cursor _cursor_for_bytes(bytes data):
+    cdef Cursor c = Cursor()
+    c.keepalive = data
+    c.buf = <const unsigned char*>data
+    c.pos = 0
+    c.end = len(data)
+    return c
+
+
+def _decode_block_records(bytes block_bytes, long64 count, ReadPlan plan):
+    """Generator decoding ``count`` records from ``block_bytes``."""
+    cdef Cursor c = _cursor_for_bytes(block_bytes)
+    cdef long64 i
+    for i in range(count):
+        yield _exec_plan(c, plan)
+
+
 def _iter_avro_records(
     fo,
     header,
@@ -1540,6 +1557,12 @@ def _iter_avro_records(
     if not read_block:
         raise ValueError(f"Unrecognized codec: {codec}")
 
+    # Compiled lazily so that schema resolution errors surface on the first
+    # record, as they always have, rather than when the reader is created.
+    cdef ReadPlan plan = None
+    if _READ_PLAN_ENABLED:
+        plan = compile_read_plan(writer_schema, named_schemas, reader_schema, options)
+
     block_count = 0
     while True:
         try:
@@ -1549,14 +1572,18 @@ def _iter_avro_records(
 
         block_fo = read_block(fo)
 
-        for i in range(block_count):
-            yield _read_data(
-                block_fo,
-                writer_schema,
-                named_schemas,
-                reader_schema,
-                options,
-            )
+        if plan is not None:
+            # BytesIO.getvalue() does not copy while the buffer is unmodified
+            yield from _decode_block_records(block_fo.getvalue(), block_count, plan)
+        else:
+            for i in range(block_count):
+                yield _read_data(
+                    block_fo,
+                    writer_schema,
+                    named_schemas,
+                    reader_schema,
+                    options,
+                )
 
         skip_sync(fo, sync_marker)
 

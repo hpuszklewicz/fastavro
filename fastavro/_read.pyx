@@ -1603,6 +1603,10 @@ def _iter_avro_blocks(
     if not read_block:
         raise ValueError(f"Unrecognized codec: {codec}")
 
+    # Shared, lazily filled plan cell: compiled by the first Block that is
+    # actually iterated, so iterating blocks without decoding costs nothing.
+    plan_cell = [None]
+
     while True:
         offset = fo.tell()
         try:
@@ -1618,7 +1622,7 @@ def _iter_avro_blocks(
 
         yield Block(
             block_bytes, num_block_records, codec, reader_schema,
-            writer_schema, named_schemas, offset, size, options,
+            writer_schema, named_schemas, offset, size, options, plan_cell,
         )
 
 
@@ -1634,6 +1638,7 @@ class Block:
         offset,
         size,
         options,
+        plan_cell=None,
     ):
         self.bytes_ = bytes_
         self.num_records = num_records
@@ -1644,8 +1649,21 @@ class Block:
         self.offset = offset
         self.size = size
         self.options = options
+        self._plan_cell = plan_cell if plan_cell is not None else [None]
 
     def __iter__(self):
+        if not _READ_PLAN_ENABLED:
+            return self._iter_generic()
+        plan = self._plan_cell[0]
+        if plan is None:
+            plan = self._plan_cell[0] = compile_read_plan(
+                self.writer_schema, self._named_schemas, self.reader_schema, self.options
+            )
+        # Decodes from the start of the block bytes, so a Block can be
+        # iterated more than once.
+        return _decode_block_records(self.bytes_.getvalue(), self.num_records, plan)
+
+    def _iter_generic(self):
         for i in range(self.num_records):
             yield _read_data(
                 self.bytes_,

@@ -8,6 +8,10 @@ from . import logical_readers
 from . import _read_common
 
 # Private API
+# Compiled read plans (Cython only). On the pure-Python implementation these
+# are no-ops that report False.
+set_read_plan_enabled = getattr(_read, "set_read_plan_enabled", lambda enabled: False)
+read_plan_enabled = getattr(_read, "read_plan_enabled", lambda: False)
 HEADER_SCHEMA = _read_common.HEADER_SCHEMA
 SYNC_SIZE = _read_common.SYNC_SIZE
 MAGIC = _read_common.MAGIC

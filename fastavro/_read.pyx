@@ -8,6 +8,7 @@
 
 import bz2
 import lzma
+import os
 import sys
 import zlib
 from datetime import datetime, timezone
@@ -35,6 +36,23 @@ from ._read_common import (
 from .const import NAMED_TYPES, AVRO_TYPES
 
 CYTHON_MODULE = 1  # Tests check this to confirm whether using the Cython code.
+
+# Compiled read plans (see "Fast decoding path" below) can be switched off,
+# e.g. to compare against the generic reader: FASTAVRO_READ_PLAN=0 in the
+# environment at import time, or set_read_plan_enabled(False) at runtime.
+_READ_PLAN_ENABLED = os.environ.get("FASTAVRO_READ_PLAN", "1") != "0"
+
+
+def set_read_plan_enabled(enabled):
+    """Enable or disable the compiled read plans; returns the previous value."""
+    global _READ_PLAN_ENABLED
+    previous = _READ_PLAN_ENABLED
+    _READ_PLAN_ENABLED = bool(enabled)
+    return previous
+
+
+def read_plan_enabled():
+    return _READ_PLAN_ENABLED
 
 decimal_context = Context()
 epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)

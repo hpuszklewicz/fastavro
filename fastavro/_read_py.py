@@ -1315,6 +1315,61 @@ def schemaless_reader(
     )
 
 
+class MessageReader:
+    """Decoder for schemaless messages, prepared once and reused.
+
+    Equivalent to ``schemaless_reader(BytesIO(payload), writer_schema,
+    reader_schema, ...)`` with the same keyword arguments, but the schemas are
+    parsed and the options fixed once in the constructor::
+
+        reader = MessageReader(parsed_writer_schema)
+        record = reader.read(payload)
+
+    On CPython the compiled read plan is built once here as well.  Trailing
+    bytes after the datum are ignored.  Instances are immutable after
+    construction.
+    """
+
+    def __init__(
+        self,
+        writer_schema: Schema,
+        reader_schema: Optional[Schema] = None,
+        *,
+        return_record_name: bool = False,
+        return_record_name_override: bool = False,
+        handle_unicode_errors: str = "strict",
+        return_named_type: bool = False,
+        return_named_type_override: bool = False,
+    ):
+        if writer_schema == reader_schema:
+            # No need for the reader schema if they are the same
+            reader_schema = None
+        self._named_schemas: Dict[str, NamedSchemas] = _default_named_schemas()
+        self.writer_schema = parse_schema(writer_schema, self._named_schemas["writer"])
+        self.reader_schema = None
+        if reader_schema:
+            self.reader_schema = parse_schema(
+                reader_schema, self._named_schemas["reader"]
+            )
+        self.options = {
+            "return_record_name": return_record_name,
+            "return_record_name_override": return_record_name_override,
+            "handle_unicode_errors": handle_unicode_errors,
+            "return_named_type": return_named_type,
+            "return_named_type_override": return_named_type_override,
+        }
+
+    def read(self, data: bytes) -> AvroMessage:
+        """Decode one datum from ``data``."""
+        return read_data(
+            BinaryDecoder(BytesIO(bytes(data))),
+            self.writer_schema,
+            self._named_schemas,
+            self.reader_schema,
+            self.options,
+        )
+
+
 def is_avro(path_or_buffer: Union[str, IO]) -> bool:
     """Return True if path (or buffer) points to an Avro file. This will only
     work for avro files that contain the normal avro schema header like those

@@ -87,6 +87,24 @@ def schemaless_reader(
     return_named_type_override: bool = ...,
 ) -> AvroMessage: ...
 def is_avro(path_or_buffer: Union[str, IO]) -> bool: ...
+
+class MessageReader:
+    writer_schema: Schema
+    reader_schema: Optional[Schema]
+    options: Dict[str, Any]
+    def __init__(
+        self,
+        writer_schema: Schema,
+        reader_schema: Optional[Schema] = ...,
+        *,
+        return_record_name: bool = ...,
+        return_record_name_override: bool = ...,
+        handle_unicode_errors: str = ...,
+        return_named_type: bool = ...,
+        return_named_type_override: bool = ...,
+    ): ...
+    def read(self, data: bytes) -> AvroMessage: ...
+
 def set_read_plan_enabled(enabled: bool) -> bool: ...
 def read_plan_enabled() -> bool: ...
 def set_schemaless_plan_cache_size(size: int) -> int: ...

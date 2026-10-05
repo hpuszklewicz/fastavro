@@ -21,6 +21,7 @@ BLOCK_READERS = _read.BLOCK_READERS
 reader = iter_avro = _read.reader
 block_reader = _read.block_reader
 schemaless_reader = _read.schemaless_reader
+MessageReader = _read.MessageReader
 json_reader = json_read.json_reader
 is_avro = _read.is_avro
 LOGICAL_READERS = logical_readers.LOGICAL_READERS
@@ -29,6 +30,7 @@ SchemaResolutionError = _read_common.SchemaResolutionError
 __all__ = [
     "reader",
     "schemaless_reader",
+    "MessageReader",
     "is_avro",
     "block_reader",
     "SchemaResolutionError",

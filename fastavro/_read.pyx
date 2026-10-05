@@ -1941,6 +1941,82 @@ cpdef schemaless_reader(
     )
 
 
+cdef class MessageReader:
+    """Decoder for schemaless messages, prepared once and reused.
+
+    Does the same work as ``schemaless_reader`` but the schema handling,
+    option handling and plan compilation happen once in the constructor, and
+    ``read`` decodes straight from ``bytes``::
+
+        reader = MessageReader(parsed_writer_schema)
+        record = reader.read(payload)
+
+    Behaviour is identical to ``schemaless_reader(BytesIO(payload), ...)``
+    with the same arguments: same values, same key order, same exceptions,
+    raised at the same point (schema resolution errors on the first ``read``
+    that hits them, not in the constructor).  Trailing bytes after the datum
+    are ignored, as ``schemaless_reader`` ignores them.  An instance is
+    immutable after construction and safe to share between threads.
+
+    ``LOGICAL_READERS`` functions are bound when the instance is built; build
+    a new instance to pick up a replacement.  If the compiled read plans are
+    disabled (``FASTAVRO_READ_PLAN=0`` or ``set_read_plan_enabled(False)``)
+    ``read`` uses the generic reader, which looks them up on every call.
+    """
+    cdef ReadPlan plan
+    cdef readonly object writer_schema
+    cdef readonly object reader_schema
+    cdef readonly dict options
+    cdef dict named_schemas
+
+    def __init__(
+        self,
+        writer_schema,
+        reader_schema=None,
+        *,
+        return_record_name=False,
+        return_record_name_override=False,
+        handle_unicode_errors="strict",
+        return_named_type=False,
+        return_named_type_override=False,
+    ):
+        if writer_schema == reader_schema:
+            # No need for the reader schema if they are the same
+            reader_schema = None
+        self.named_schemas = _default_named_schemas()
+        self.writer_schema = parse_schema(writer_schema, self.named_schemas["writer"])
+        self.reader_schema = None
+        if reader_schema:
+            self.reader_schema = parse_schema(reader_schema, self.named_schemas["reader"])
+        self.options = {
+            "return_record_name": return_record_name,
+            "return_record_name_override": return_record_name_override,
+            "handle_unicode_errors": handle_unicode_errors,
+            "return_named_type": return_named_type,
+            "return_named_type_override": return_named_type_override,
+        }
+        self.plan = compile_read_plan(
+            self.writer_schema, self.named_schemas, self.reader_schema, self.options
+        )
+
+    def read(self, data):
+        """Decode one datum from ``data`` (bytes, or anything supporting the
+        buffer protocol, which is copied)."""
+        cdef Cursor c
+        if type(data) is not bytes:
+            data = bytes(data)
+        if not _READ_PLAN_ENABLED:
+            return _read_data(
+                BytesIO(data),
+                self.writer_schema,
+                self.named_schemas,
+                self.reader_schema,
+                self.options,
+            )
+        c = _cursor_for_bytes(data)
+        return _exec_plan(c, self.plan)
+
+
 cpdef is_avro(path_or_buffer):
     if isinstance(path_or_buffer, str):
         fp = open(path_or_buffer, "rb")

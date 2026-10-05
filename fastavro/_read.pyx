@@ -1034,6 +1034,263 @@ cdef class ReadPlan:
 
 
 
+cdef object _ref_key(object schema):
+    return id(schema) if schema is not None else 0
+
+
+cdef ReadPlan _error_plan(message):
+    cdef ReadPlan p = ReadPlan()
+    p.kind = K_ERROR
+    p.error_message = message
+    return p
+
+
+cdef str _branch_name(idx_schema, idx_reader_schema, named_schemas, bint use_reader_lookup):
+    if idx_reader_schema is not None:
+        if isinstance(idx_reader_schema, dict):
+            return idx_reader_schema["name"]
+        return named_schemas["reader"][idx_reader_schema]["name"]
+    if use_reader_lookup:
+        return named_schemas["writer"][idx_schema]["name"]
+    return idx_schema["name"]
+
+
+cdef ReadPlan _build_plan(
+    object writer_schema,
+    object reader_schema,
+    dict named_schemas,
+    dict options,
+    dict memo,
+):
+    cdef ReadPlan plan
+    cdef ReadPlan sub
+    cdef list branches, branch_names
+    cdef list field_names, field_plans
+    cdef list default_names, default_values
+
+    record_type = extract_record_type(writer_schema)
+
+    if reader_schema:
+        try:
+            reader_schema = match_schemas(writer_schema, reader_schema, named_schemas)
+        except SchemaResolutionError as e:
+            return _error_plan(str(e))
+
+    if record_type in ("record", "error"):
+        key = (id(writer_schema), _ref_key(reader_schema))
+        plan = memo.get(key)
+        if plan is not None:
+            return plan
+        plan = ReadPlan()
+        memo[key] = plan
+        plan.kind = K_RECORD
+        field_names = []
+        field_plans = []
+        if reader_schema is None:
+            for field in writer_schema["fields"]:
+                field_names.append(field["name"])
+                field_plans.append(_build_plan(field["type"], None, named_schemas, options, memo))
+        else:
+            readers_field_dict = {}
+            aliases_field_dict = {}
+            for f in reader_schema["fields"]:
+                readers_field_dict[f["name"]] = f
+                for alias in f.get("aliases", []):
+                    aliases_field_dict[alias] = f
+            for field in writer_schema["fields"]:
+                readers_field = readers_field_dict.get(
+                    field["name"], aliases_field_dict.get(field["name"])
+                )
+                if readers_field:
+                    field_names.append(readers_field["name"])
+                    field_plans.append(_build_plan(
+                        field["type"], readers_field["type"], named_schemas, options, memo
+                    ))
+                    del readers_field_dict[readers_field["name"]]
+                else:
+                    field_names.append(None)
+                    field_plans.append(_build_plan(field["type"], None, named_schemas, options, memo))
+            default_names = []
+            default_values = []
+            for f_name, field in readers_field_dict.items():
+                if "default" in field:
+                    default_names.append(field["name"])
+                    default_values.append(field["default"])
+                else:
+                    plan.missing_default_error = (
+                        f"No default value for field {field['name']} in {reader_schema['name']}"
+                    )
+                    break
+            if default_names:
+                plan.default_names = default_names
+                plan.default_values = default_values
+        plan.field_names = field_names
+        plan.field_plans = field_plans
+
+    elif record_type == "null":
+        plan = ReadPlan()
+        plan.kind = K_NULL
+    elif record_type == "string":
+        plan = ReadPlan()
+        plan.kind = K_STRING
+    elif record_type == "int":
+        plan = ReadPlan()
+        plan.kind = K_INT
+    elif record_type == "long":
+        plan = ReadPlan()
+        plan.kind = K_LONG
+    elif record_type == "float":
+        plan = ReadPlan()
+        plan.kind = K_FLOAT
+    elif record_type == "double":
+        plan = ReadPlan()
+        plan.kind = K_DOUBLE
+    elif record_type == "boolean":
+        plan = ReadPlan()
+        plan.kind = K_BOOLEAN
+    elif record_type == "bytes":
+        plan = ReadPlan()
+        plan.kind = K_BYTES
+    elif record_type == "fixed":
+        plan = ReadPlan()
+        plan.kind = K_FIXED
+        plan.size = writer_schema["size"]
+    elif record_type == "enum":
+        plan = ReadPlan()
+        plan.kind = K_ENUM
+        plan.enum_symbols = list(writer_schema["symbols"])
+        if reader_schema:
+            resolved = []
+            errors = []
+            reader_symbols = reader_schema["symbols"]
+            for symbol in plan.enum_symbols:
+                if symbol in reader_symbols:
+                    resolved.append(symbol)
+                    errors.append(None)
+                else:
+                    default = reader_schema.get("default")
+                    if default:
+                        resolved.append(default)
+                        errors.append(None)
+                    else:
+                        resolved.append(None)
+                        errors.append(
+                            f"{symbol} not found in reader symbol list "
+                            f"{reader_schema['name']}, known symbols: {reader_symbols}"
+                        )
+            plan.enum_resolved = resolved
+            plan.enum_errors = errors
+    elif record_type == "array":
+        plan = ReadPlan()
+        plan.kind = K_ARRAY
+        plan.child = _build_plan(
+            writer_schema["items"],
+            reader_schema["items"] if reader_schema else None,
+            named_schemas, options, memo,
+        )
+    elif record_type == "map":
+        plan = ReadPlan()
+        plan.kind = K_MAP
+        plan.child = _build_plan(
+            writer_schema["values"],
+            reader_schema["values"] if reader_schema else None,
+            named_schemas, options, memo,
+        )
+    elif record_type in ("union", "error_union"):
+        plan = ReadPlan()
+        plan.kind = K_UNION
+        branches = []
+        branch_names = []
+        rnn_override = options.get("return_record_name_override")
+        rnn = options.get("return_record_name")
+        rnt_override = options.get("return_named_type_override")
+        rnt = options.get("return_named_type")
+        single_name = is_single_name_union(writer_schema) if rnt_override else False
+        single_record = is_single_record_union(writer_schema) if rnn_override else False
+        for idx_schema in writer_schema:
+            idx_reader_schema = None
+            if reader_schema:
+                if not isinstance(reader_schema, list):
+                    if match_types(idx_schema, reader_schema, named_schemas):
+                        sub = _build_plan(idx_schema, reader_schema, named_schemas, options, memo)
+                    else:
+                        sub = _error_plan(
+                            f"schema mismatch: {writer_schema} not found in {reader_schema}"
+                        )
+                else:
+                    for schema in reader_schema:
+                        if match_types(idx_schema, schema, named_schemas):
+                            idx_reader_schema = schema
+                            sub = _build_plan(idx_schema, schema, named_schemas, options, memo)
+                            break
+                    else:
+                        sub = _error_plan(
+                            f"schema mismatch: {writer_schema} not found in {reader_schema}"
+                        )
+            else:
+                sub = _build_plan(idx_schema, None, named_schemas, options, memo)
+            branches.append(sub)
+
+            et = extract_record_type(idx_schema)
+            name = None
+            if rnt_override and single_name:
+                name = None
+            elif rnt and et in NAMED_TYPES:
+                name = _branch_name(idx_schema, idx_reader_schema, named_schemas, False)
+            elif rnt and et not in AVRO_TYPES:
+                name = _branch_name(idx_schema, idx_reader_schema, named_schemas, True)
+            elif rnn_override and single_record:
+                name = None
+            elif rnn and et == "record":
+                name = _branch_name(idx_schema, idx_reader_schema, named_schemas, False)
+            elif rnn and et not in AVRO_TYPES:
+                name = _branch_name(idx_schema, idx_reader_schema, named_schemas, True)
+            branch_names.append(name)
+        plan.branches = branches
+        plan.branch_names = branch_names
+    else:
+        # named type reference
+        if reader_schema is not None and isinstance(reader_schema, dict):
+            resolved_reader = reader_schema
+        else:
+            resolved_reader = named_schemas["reader"].get(reader_schema)
+        return _build_plan(
+            named_schemas["writer"][record_type],
+            resolved_reader,
+            named_schemas, options, memo,
+        )
+
+    plan.writer_schema = writer_schema
+    plan.reader_schema = reader_schema
+    errors_obj = options.get("handle_unicode_errors", "strict")
+    if errors_obj is None or errors_obj == "strict":
+        plan.errors = NULL
+    else:
+        plan.errors_obj = errors_obj.encode() if isinstance(errors_obj, str) else bytes(errors_obj)
+        plan.errors = plan.errors_obj
+
+    if isinstance(writer_schema, dict) and "logicalType" in writer_schema:
+        fn = LOGICAL_READERS.get(extract_logical_type(writer_schema))
+        if fn:
+            plan.logical_fn = fn
+
+    if reader_schema is not None:
+        reader_type = extract_record_type(reader_schema)
+        if record_type in ("int", "long") and reader_type in ("float", "double"):
+            plan.promote = P_FLOAT
+        elif record_type == "string" and reader_type == "bytes":
+            plan.promote = P_ENCODE
+        elif record_type == "bytes" and reader_type == "string":
+            plan.promote = P_DECODE
+
+    return plan
+
+
+cpdef ReadPlan compile_read_plan(writer_schema, named_schemas, reader_schema, options):
+    """Compile a (writer schema, reader schema, options) triple into a ReadPlan."""
+    return _build_plan(writer_schema, reader_schema, named_schemas, dict(options), {})
+
+
 def _iter_avro_records(
     fo,
     header,

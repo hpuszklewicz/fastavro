@@ -962,6 +962,78 @@ else:
     BLOCK_READERS["lz4"] = lz4_read_block
 
 
+# ---------------------------------------------------------------------------
+# Fast decoding path
+#
+# The generic readers above take a file-like object and dispatch on the schema
+# for every datum.  The path below is used for container files (whose blocks
+# are fully in memory once decompressed) and for schemaless_reader on a
+# BytesIO: the schema is compiled once into a tree of ReadPlan nodes (all
+# schema resolution, option handling and logical-type lookup happens there),
+# and the data is decoded straight from a C pointer with a C switch per
+# datum.  Behaviour, including which errors are raised and when, mirrors
+# _read_data.
+# ---------------------------------------------------------------------------
+
+
+cdef enum:
+    K_NULL = 0
+    K_BOOLEAN = 1
+    K_INT = 2
+    K_LONG = 3
+    K_FLOAT = 4
+    K_DOUBLE = 5
+    K_BYTES = 6
+    K_STRING = 7
+    K_FIXED = 8
+    K_ENUM = 9
+    K_ARRAY = 10
+    K_MAP = 11
+    K_UNION = 12
+    K_RECORD = 13
+    K_ERROR = 14
+
+cdef enum:
+    P_NONE = 0
+    P_FLOAT = 1
+    P_ENCODE = 2
+    P_DECODE = 3
+
+
+cdef class Cursor:
+    """Read position inside an in-memory buffer.  ``keepalive`` holds the
+    object that owns the memory."""
+    cdef const unsigned char* buf
+    cdef Py_ssize_t pos
+    cdef Py_ssize_t end
+    cdef object keepalive
+
+
+cdef class ReadPlan:
+    """One node of a compiled (writer schema, reader schema, options) triple."""
+    cdef int kind
+    cdef int promote
+    cdef Py_ssize_t size                 # fixed
+    cdef list enum_symbols               # enum: writer symbols
+    cdef list enum_resolved              # enum with reader: per index symbol/default or None
+    cdef list enum_errors                # enum with reader: per index error message or None
+    cdef ReadPlan child                  # array items / map values
+    cdef list branches                   # union: ReadPlan per writer branch
+    cdef list branch_names               # union: name to wrap with, or None
+    cdef list field_names                # record: str, or None to skip the field
+    cdef list field_plans                # record: ReadPlan per writer field
+    cdef list default_names              # record: reader-only fields with defaults
+    cdef list default_values
+    cdef object missing_default_error    # record: message to raise, or None
+    cdef object logical_fn
+    cdef object writer_schema
+    cdef object reader_schema
+    cdef object errors_obj               # handle_unicode_errors
+    cdef const char* errors              # NULL means "strict"
+    cdef object error_message            # K_ERROR
+
+
+
 def _iter_avro_records(
     fo,
     header,

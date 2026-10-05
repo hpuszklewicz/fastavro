@@ -58,6 +58,10 @@ decimal_context = Context()
 epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
 epoch_naive = datetime(1970, 1, 1)
 
+from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.unicode cimport PyUnicode_DecodeUTF8
+from cpython.list cimport PyList_GET_ITEM, PyList_GET_SIZE
+
 ctypedef int int32
 ctypedef unsigned int uint32
 ctypedef unsigned long long ulong64
@@ -1289,6 +1293,234 @@ cdef ReadPlan _build_plan(
 cpdef ReadPlan compile_read_plan(writer_schema, named_schemas, reader_schema, options):
     """Compile a (writer schema, reader schema, options) triple into a ReadPlan."""
     return _build_plan(writer_schema, reader_schema, named_schemas, dict(options), {})
+
+
+cdef inline int _need(Cursor c, Py_ssize_t n) except -1:
+    # A negative n comes from a corrupted length varint; the generic reader
+    # reports that as EOFError as well.
+    if n < 0 or c.end - c.pos < n:
+        raise EOFError(f"Expected {n} bytes, read {c.end - c.pos}")
+    return 0
+
+
+cdef inline long64 _c_read_long(Cursor c) except? -1:
+    cdef ulong64 b
+    cdef ulong64 n
+    cdef int32 shift
+    cdef const unsigned char* buf = c.buf
+    cdef Py_ssize_t pos = c.pos
+    cdef Py_ssize_t end = c.end
+
+    if pos >= end:
+        raise EOFError
+    b = buf[pos]
+    pos += 1
+    n = b & 0x7F
+    shift = 7
+    while (b & 0x80) != 0:
+        if pos >= end:
+            raise EOFError
+        if shift > 63:
+            # more than 10 continuation bytes cannot encode a 64-bit value
+            raise ValueError("invalid varint: more than 10 bytes")
+        b = buf[pos]
+        pos += 1
+        n |= (b & 0x7F) << shift
+        shift += 7
+    c.pos = pos
+    return (n >> 1) ^ -(n & 1)
+
+
+cdef inline unicode _c_read_utf8(Cursor c, const char* errors):
+    cdef long64 size = _c_read_long(c)
+    _need(c, size)
+    s = PyUnicode_DecodeUTF8(<const char*>(c.buf + c.pos), size, errors)
+    c.pos += size
+    return s
+
+
+cdef object _exec_plan(Cursor c, ReadPlan p):
+    cdef int kind = p.kind
+    cdef long64 n, i, block_count
+    cdef Py_ssize_t nfields, idx
+    cdef ReadPlan sub
+    cdef dict record
+    cdef list items
+    cdef dict mapping
+    cdef unsigned char ch_data[8]
+    cdef float_uint32 fi
+    cdef double_ulong64 dl
+    cdef object data
+    cdef object name
+
+    if kind == K_STRING:
+        data = _c_read_utf8(c, p.errors)
+    elif kind == K_LONG or kind == K_INT:
+        data = _c_read_long(c)
+    elif kind == K_RECORD:
+        record = {}
+        nfields = PyList_GET_SIZE(p.field_plans)
+        for idx in range(nfields):
+            sub = <ReadPlan>PyList_GET_ITEM(p.field_plans, idx)
+            name = <object>PyList_GET_ITEM(p.field_names, idx)
+            if name is None:
+                _skip_plan(c, sub)
+            else:
+                record[name] = _exec_plan(c, sub)
+        if p.default_names is not None:
+            nfields = PyList_GET_SIZE(p.default_names)
+            for idx in range(nfields):
+                record[<object>PyList_GET_ITEM(p.default_names, idx)] = (
+                    <object>PyList_GET_ITEM(p.default_values, idx)
+                )
+        if p.missing_default_error is not None:
+            raise SchemaResolutionError(p.missing_default_error)
+        data = record
+    elif kind == K_DOUBLE:
+        _need(c, 8)
+        dl.n = (c.buf[c.pos]
+                | (<ulong64>(c.buf[c.pos + 1]) << 8)
+                | (<ulong64>(c.buf[c.pos + 2]) << 16)
+                | (<ulong64>(c.buf[c.pos + 3]) << 24)
+                | (<ulong64>(c.buf[c.pos + 4]) << 32)
+                | (<ulong64>(c.buf[c.pos + 5]) << 40)
+                | (<ulong64>(c.buf[c.pos + 6]) << 48)
+                | (<ulong64>(c.buf[c.pos + 7]) << 56))
+        c.pos += 8
+        data = dl.d
+    elif kind == K_UNION:
+        n = _c_read_long(c)
+        if n < 0 or n >= PyList_GET_SIZE(p.branches):
+            raise IndexError("list index out of range")
+        sub = <ReadPlan>PyList_GET_ITEM(p.branches, n)
+        data = _exec_plan(c, sub)
+        name = <object>PyList_GET_ITEM(p.branch_names, n)
+        if name is not None:
+            data = (name, data)
+    elif kind == K_NULL:
+        data = None
+    elif kind == K_BOOLEAN:
+        _need(c, 1)
+        data = c.buf[c.pos] != 0
+        c.pos += 1
+    elif kind == K_ARRAY:
+        items = []
+        sub = p.child
+        block_count = _c_read_long(c)
+        while block_count != 0:
+            if block_count < 0:
+                block_count = -block_count
+                _c_read_long(c)  # block size, unused
+            for i in range(block_count):
+                items.append(_exec_plan(c, sub))
+            block_count = _c_read_long(c)
+        data = items
+    elif kind == K_MAP:
+        mapping = {}
+        sub = p.child
+        block_count = _c_read_long(c)
+        while block_count != 0:
+            if block_count < 0:
+                block_count = -block_count
+                _c_read_long(c)  # block size, unused
+            for i in range(block_count):
+                name = _c_read_utf8(c, p.errors)
+                mapping[name] = _exec_plan(c, sub)
+            block_count = _c_read_long(c)
+        data = mapping
+    elif kind == K_BYTES:
+        n = _c_read_long(c)
+        _need(c, n)
+        data = PyBytes_FromStringAndSize(<const char*>(c.buf + c.pos), n)
+        c.pos += n
+    elif kind == K_FLOAT:
+        _need(c, 4)
+        fi.n = (c.buf[c.pos]
+                | (c.buf[c.pos + 1] << 8)
+                | (c.buf[c.pos + 2] << 16)
+                | (c.buf[c.pos + 3] << 24))
+        c.pos += 4
+        data = fi.f
+    elif kind == K_FIXED:
+        _need(c, p.size)
+        data = PyBytes_FromStringAndSize(<const char*>(c.buf + c.pos), p.size)
+        c.pos += p.size
+    elif kind == K_ENUM:
+        n = _c_read_long(c)
+        if n < 0 or n >= PyList_GET_SIZE(p.enum_symbols):
+            raise IndexError("list index out of range")
+        if p.enum_resolved is None:
+            data = <object>PyList_GET_ITEM(p.enum_symbols, n)
+        else:
+            data = <object>PyList_GET_ITEM(p.enum_resolved, n)
+            if data is None:
+                raise SchemaResolutionError(<object>PyList_GET_ITEM(p.enum_errors, n))
+    else:  # K_ERROR
+        raise SchemaResolutionError(p.error_message)
+
+    if p.logical_fn is not None:
+        return p.logical_fn(data, p.writer_schema, p.reader_schema)
+    if p.promote != P_NONE:
+        if p.promote == P_FLOAT:
+            return float(data)
+        elif p.promote == P_ENCODE:
+            return data.encode()
+        else:
+            return data.decode()
+    return data
+
+
+cdef int _skip_plan(Cursor c, ReadPlan p) except -1:
+    cdef int kind = p.kind
+    cdef long64 n, i, block_count
+    cdef Py_ssize_t nfields, idx
+
+    if kind == K_STRING or kind == K_BYTES:
+        n = _c_read_long(c)
+        _need(c, n)
+        c.pos += n
+    elif kind == K_LONG or kind == K_INT or kind == K_ENUM:
+        _c_read_long(c)
+    elif kind == K_RECORD:
+        nfields = PyList_GET_SIZE(p.field_plans)
+        for idx in range(nfields):
+            _skip_plan(c, <ReadPlan>PyList_GET_ITEM(p.field_plans, idx))
+    elif kind == K_DOUBLE:
+        _need(c, 8)
+        c.pos += 8
+    elif kind == K_FLOAT:
+        _need(c, 4)
+        c.pos += 4
+    elif kind == K_BOOLEAN:
+        _need(c, 1)
+        c.pos += 1
+    elif kind == K_FIXED:
+        _need(c, p.size)
+        c.pos += p.size
+    elif kind == K_UNION:
+        n = _c_read_long(c)
+        if n < 0 or n >= PyList_GET_SIZE(p.branches):
+            raise IndexError("list index out of range")
+        _skip_plan(c, <ReadPlan>PyList_GET_ITEM(p.branches, n))
+    elif kind == K_ARRAY or kind == K_MAP:
+        block_count = _c_read_long(c)
+        while block_count != 0:
+            if block_count < 0:
+                block_count = -block_count
+                n = _c_read_long(c)
+                _need(c, n)
+                c.pos += n
+            else:
+                for i in range(block_count):
+                    if kind == K_MAP:
+                        n = _c_read_long(c)
+                        _need(c, n)
+                        c.pos += n
+                    _skip_plan(c, p.child)
+            block_count = _c_read_long(c)
+    elif kind == K_ERROR:
+        raise SchemaResolutionError(p.error_message)
+    return 0
 
 
 def _iter_avro_records(

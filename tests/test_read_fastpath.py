@@ -1,3 +1,4 @@
+import pickle
 import tracemalloc
 from io import BytesIO
 
@@ -106,3 +107,11 @@ def test_schemaless_read_does_not_copy_the_buffer():
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert peak < 64 * 1024
+
+
+def test_compiled_plans_refuse_to_be_pickled():
+    plan = _read.compile_read_plan(
+        parsed([{"name": "x", "type": "int"}]), {"writer": {}, "reader": {}}, None, {}
+    )
+    with pytest.raises(TypeError):
+        pickle.dumps(plan)

@@ -13,6 +13,7 @@ import sys
 import zlib
 from datetime import datetime, timezone
 from decimal import Context
+from functools import partial
 from io import BytesIO
 from warnings import warn
 
@@ -58,6 +59,7 @@ decimal_context = Context()
 epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
 epoch_naive = datetime(1970, 1, 1)
 
+cimport cython
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 from cpython.list cimport PyList_GET_ITEM, PyList_GET_SIZE
@@ -1004,6 +1006,9 @@ cdef enum:
     P_DECODE = 3
 
 
+# Cursor and ReadPlan hold C pointers, which Cython's generated pickling
+# would dereference: they are never pickled (see Block and MessageReader).
+@cython.auto_pickle(False)
 cdef class Cursor:
     """Read position inside an in-memory buffer.  ``keepalive`` holds the
     object that owns the memory."""
@@ -1013,6 +1018,7 @@ cdef class Cursor:
     cdef object keepalive
 
 
+@cython.auto_pickle(False)
 cdef class ReadPlan:
     """One node of a compiled (writer schema, reader schema, options) triple."""
     cdef int kind
@@ -1750,6 +1756,13 @@ class Block:
         # iterated more than once.
         return _decode_block_records(self.bytes_.getvalue(), self.num_records, plan)
 
+    def __getstate__(self):
+        # The shared plan cell may hold a compiled plan; an unpickled Block
+        # compiles its own when it is first iterated.
+        state = self.__dict__.copy()
+        state["_plan_cell"] = [None]
+        return state
+
     def _iter_generic(self):
         for i in range(self.num_records):
             yield _read_data(
@@ -1997,6 +2010,13 @@ cdef class MessageReader:
         }
         self.plan = compile_read_plan(
             self.writer_schema, self.named_schemas, self.reader_schema, self.options
+        )
+
+    def __reduce__(self):
+        # Pickled as its arguments; the plan is compiled again when unpickled.
+        return (
+            partial(MessageReader, **self.options),
+            (self.writer_schema, self.reader_schema),
         )
 
     def read(self, data):

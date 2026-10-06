@@ -1,3 +1,4 @@
+import pickle
 from io import BytesIO
 
 import pytest
@@ -447,6 +448,18 @@ def test_block_reader_with_reader_schema():
     fo.seek(0)
     out = [rec for b in fastavro.block_reader(fo, reader_schema) for rec in b]
     assert out == [{"n": i, "d": 1} for i in range(10)]
+
+
+def test_block_can_be_pickled_after_another_block_was_decoded():
+    schema = record_schema("R", [{"name": "s", "type": "string"}])
+    fo = BytesIO()
+    fastavro.writer(
+        fo, schema, [{"s": str(i)} for i in range(5000)], sync_interval=2000
+    )
+    fo.seek(0)
+    first, second, *_ = fastavro.block_reader(fo)
+    list(first)
+    assert list(pickle.loads(pickle.dumps(second))) == list(second)
 
 
 @pytest.mark.parametrize(

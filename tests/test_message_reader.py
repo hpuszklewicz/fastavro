@@ -1,10 +1,12 @@
+import copy
+import pickle
 import random
 from io import BytesIO
 
 import pytest
 
 import fastavro
-from fastavro.read import LOGICAL_READERS, MessageReader, SchemaResolutionError
+from fastavro.read import LOGICAL_READERS, MessageReader, SchemaResolutionError, _read
 
 from .test_read_behaviour import (
     LINKED,
@@ -126,3 +128,26 @@ def test_matches_schemaless_reader_on_generated_schemas():
         reader, _ = mutate_reader(schema, random.Random(seed))
         assert_same_as_schemaless(data, schema, reader)
         assert_same_as_schemaless(data, schema, return_record_name=True)
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    [lambda r: pickle.loads(pickle.dumps(r)), copy.deepcopy],
+    ids=["pickle", "deepcopy"],
+)
+def test_pickle_and_deepcopy(duplicate):
+    # Pickle finds a class by its module and name. tests/test_compression.py
+    # reloads fastavro._read_py, after which fastavro.read.MessageReader is a
+    # stale class on the pure-Python path, so take the class from the module.
+    data = schemaless_bytes(UNION_SCHEMA, UNION_RECORDS[1])
+    original = _read.MessageReader(UNION_SCHEMA, UNION_SCHEMA, return_record_name=True)
+    copied = duplicate(original)
+    assert copied.options == original.options
+    assert (
+        copied.read(data)
+        == original.read(data)
+        == {
+            "u": ("t.A", {"x": 1}),
+            "ref": ("t.A", {"x": 2}),
+        }
+    )

@@ -1,3 +1,21 @@
+Unreleased
+* Read faster on CPython, usually 3-5x. fastavro used to look at the schema
+  again for every value it read, to decide how to decode it. It now makes
+  those decisions once, as a "read plan", and decodes by running the plan
+  directly over the bytes in C: compiling instead of interpreting. Used by
+  reader, block_reader and schemaless_reader; see "Compiled read plans" in
+  the docs. Set FASTAVRO_READ_PLAN=0 to use the previous reader
+* Add fastavro.read.MessageReader to decode many schemaless messages that
+  share a schema
+* Corrupt or cut-off input now always raises an error, where some cases used
+  to return data: EOFError when the data ends early, IndexError for an
+  invalid union or enum index, ValueError for an oversized number
+* After an error, schemaless_reader can leave the stream at an earlier
+  position than before
+* With read plans, a Block can be iterated more than once, and custom codecs
+  in BLOCK_READERS must return a BytesIO
+* Fix two TypeError crashes with some reader schemas
+
 2026-04-24 version 1.12.2
 * Publish wheels for Windows ARM64 (@Harishmcw)
 

@@ -11,6 +11,7 @@ import lzma
 import os
 import sys
 import zlib
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Context
 from functools import partial
@@ -1564,23 +1565,54 @@ cdef object _read_one_from_bytesio(fo, ReadPlan plan):
 # (writer_schema, reader_schema, options) -> plan, keyed by object identity.
 # Entries keep references to the schema objects so an id cannot be reused by
 # a different object while it is cached.  When full, the oldest entry is
-# evicted (dicts iterate in insertion order).  Each entry also records the
-# LOGICAL_READERS functions the plan captured, so replacing a registered
-# reader invalidates the entry on its next use, as the generic reader would
-# see the replacement immediately.
+# evicted.  Each entry also records the LOGICAL_READERS functions the plan
+# captured, so replacing a registered reader invalidates the entry on its
+# next use, as the generic reader would see the replacement immediately.
+#
+# _SCHEMALESS_ORDER holds the keys in insertion order, so evicting the oldest
+# entry is O(1): next(iter(dict)) walks past every slot already deleted from
+# the front of the dict.  Keys removed by an invalidation stay in it until
+# they reach the front, and it is rebuilt from the dict when it grows past
+# twice the dict's size.  Each entry stores the key object it was inserted
+# with, and eviction only removes an entry whose stored key *is* the popped
+# one: a leftover key can equal a newer key (ids are reused once a schema is
+# freed) and must not evict it.  The dict and the deque are only used while
+# holding _SCHEMALESS_LOCK: without a GIL, a dict lookup returns a borrowed
+# reference that a concurrent delete could free.
 cdef dict _SCHEMALESS_PLANS = {}
+cdef object _SCHEMALESS_ORDER = deque()
+cdef cython.pymutex _SCHEMALESS_LOCK
 cdef Py_ssize_t _SCHEMALESS_PLANS_MAX = int(
     os.environ.get("FASTAVRO_SCHEMALESS_PLAN_CACHE", "2048")
 )
 
 
+cdef _evict_to(Py_ssize_t size):
+    """Evict the oldest entries until at most `size` remain (lock held)."""
+    while len(_SCHEMALESS_PLANS) > size and _SCHEMALESS_ORDER:
+        key = _SCHEMALESS_ORDER.popleft()
+        entry = _SCHEMALESS_PLANS.get(key)
+        if entry is not None and entry[4] is key:
+            del _SCHEMALESS_PLANS[key]
+
+
+cdef _remember(key):
+    """Record a newly inserted key (lock held)."""
+    global _SCHEMALESS_ORDER
+    _SCHEMALESS_ORDER.append(key)
+    if len(_SCHEMALESS_ORDER) > 2 * len(_SCHEMALESS_PLANS) + 64:
+        # dicts iterate in insertion order: this keeps the live keys only
+        _SCHEMALESS_ORDER = deque(entry[4] for entry in _SCHEMALESS_PLANS.values())
+
+
 def set_schemaless_plan_cache_size(size):
     """Set the number of compiled schemaless plans kept; returns the old size."""
     global _SCHEMALESS_PLANS_MAX
-    previous = _SCHEMALESS_PLANS_MAX
-    _SCHEMALESS_PLANS_MAX = max(0, int(size))
-    while len(_SCHEMALESS_PLANS) > _SCHEMALESS_PLANS_MAX:
-        del _SCHEMALESS_PLANS[next(iter(_SCHEMALESS_PLANS))]
+    size = max(0, int(size))
+    with _SCHEMALESS_LOCK:
+        previous = _SCHEMALESS_PLANS_MAX
+        _SCHEMALESS_PLANS_MAX = size
+        _evict_to(size)
     return previous
 
 
@@ -1614,22 +1646,23 @@ cdef ReadPlan _schemaless_plan(writer_schema, reader_schema, dict named_schemas,
         options["return_named_type"],
         options["return_named_type_override"],
     )
-    entry = _SCHEMALESS_PLANS.get(key)
-    if entry is not None and entry[0] is writer_schema and entry[1] is reader_schema:
-        for logical_key, fn in <list>entry[3]:
-            if LOGICAL_READERS.get(logical_key) is not fn:
-                break
-        else:
-            return <ReadPlan>entry[2]
-        del _SCHEMALESS_PLANS[key]
+    with _SCHEMALESS_LOCK:
+        entry = _SCHEMALESS_PLANS.get(key)
+        if entry is not None and entry[0] is writer_schema and entry[1] is reader_schema:
+            for logical_key, fn in <list>entry[3]:
+                if LOGICAL_READERS.get(logical_key) is not fn:
+                    break
+            else:
+                return <ReadPlan>entry[2]
+            del _SCHEMALESS_PLANS[key]
     plan = _build_plan(writer_schema, reader_schema, named_schemas, options, {})
     if _SCHEMALESS_PLANS_MAX <= 0:
         return plan
-    while len(_SCHEMALESS_PLANS) >= _SCHEMALESS_PLANS_MAX:
-        del _SCHEMALESS_PLANS[next(iter(_SCHEMALESS_PLANS))]
-    _SCHEMALESS_PLANS[key] = (
-        writer_schema, reader_schema, plan, _logical_readers_used(plan, [], set())
-    )
+    used = _logical_readers_used(plan, [], set())
+    with _SCHEMALESS_LOCK:
+        _evict_to(_SCHEMALESS_PLANS_MAX - 1)
+        _SCHEMALESS_PLANS[key] = (writer_schema, reader_schema, plan, used, key)
+        _remember(key)
     return plan
 
 

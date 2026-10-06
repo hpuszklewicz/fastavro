@@ -15,6 +15,7 @@ Unreleased
 * With read plans, a Block can be iterated more than once, and custom codecs
   in BLOCK_READERS must return a BytesIO
 * Fix two TypeError crashes with some reader schemas
+* Building from source needs Cython 3.1 or newer
 
 2026-04-24 version 1.12.2
 * Publish wheels for Windows ARM64 (@Harishmcw)

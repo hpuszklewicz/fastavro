@@ -1,4 +1,7 @@
 import pickle
+import random
+import sys
+import threading
 import tracemalloc
 from io import BytesIO
 
@@ -79,17 +82,25 @@ def test_replacing_a_logical_reader_is_seen_by_cached_plans():
 
 
 def test_cache_is_keyed_by_schema_identity_and_evicts_oldest_first():
-    previous = _read.set_schemaless_plan_cache_size(4)
+    previous = _read.set_schemaless_plan_cache_size(0)  # start empty
+    _read.set_schemaless_plan_cache_size(4)
     try:
         fields = [{"name": "x", "type": "int"}]
         schemas = [parsed(fields) for _ in range(6)]
-        for s in schemas:
-            assert fastavro.schemaless_reader(BytesIO(b"\x02"), s) == {"x": 1}
+        assert all(
+            fastavro.schemaless_reader(BytesIO(b"\x02"), s) == {"x": 1} for s in schemas
+        )
         assert _read.schemaless_plan_cache_info() == {"size": 4, "capacity": 4}
+        # A cached entry keeps its schema alive, so evicted schemas have fewer
+        # references than cached ones: the two oldest were evicted. (A for loop
+        # above would leave its variable referencing the last schema.)
+        counts = [sys.getrefcount(s) for s in schemas]
+        assert counts[0] == counts[1] < counts[2] == counts[3] == counts[4] == counts[5]
         fastavro.schemaless_reader(
             BytesIO(b"\x02"), schemas[5], return_record_name=True
         )
         assert _read.schemaless_plan_cache_info()["size"] == 4
+        assert sys.getrefcount(schemas[2]) == sys.getrefcount(schemas[0])
         _read.set_schemaless_plan_cache_size(0)
         assert _read.schemaless_plan_cache_info()["size"] == 0
         assert fastavro.schemaless_reader(BytesIO(b"\x02"), schemas[0]) == {"x": 1}
@@ -115,3 +126,59 @@ def test_compiled_plans_refuse_to_be_pickled():
     )
     with pytest.raises(TypeError):
         pickle.dumps(plan)
+
+
+@pytest.mark.parametrize("capacity", [8, 2], ids=["cache never full", "cache full"])
+def test_replaced_logical_readers_do_not_pile_up_in_the_cache(capacity):
+    # Replacing a logical reader invalidates the cached plans that captured
+    # it; their keys must not accumulate, whether or not the cache evicts.
+    key = "int-cache-churn-probe"
+    logical = {"type": "int", "logicalType": "cache-churn-probe"}
+    schemas = [parsed([{"name": "x", "type": logical}]) for _ in range(3)]
+    previous = _read.set_schemaless_plan_cache_size(0)  # start empty
+    _read.set_schemaless_plan_cache_size(capacity)
+
+    def churn(rounds):
+        for _ in range(rounds):
+            LOGICAL_READERS[key] = lambda data, w, r: data  # a new function
+            for s in schemas:
+                assert fastavro.schemaless_reader(BytesIO(b"\x02"), s) == {"x": 1}
+
+    try:
+        churn(200)
+        tracemalloc.start()
+        churn(5000)
+        grown, _ = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert _read.schemaless_plan_cache_info()["size"] == min(capacity, 3)
+        assert grown < 64 * 1024
+    finally:
+        LOGICAL_READERS.pop(key, None)
+        _read.set_schemaless_plan_cache_size(previous)
+
+
+def test_concurrent_reads_while_the_cache_evicts():
+    # Meaningful on free-threaded builds (PYTHON_GIL=0), where threads use the
+    # cache at the same time; with a GIL it is a smoke test.
+    schemas = [parsed([{"name": "x", "type": "int"}]) for _ in range(32)]
+    errors = []
+
+    def work(seed):
+        rnd = random.Random(seed)
+        try:
+            for _ in range(2000):
+                s = rnd.choice(schemas)
+                assert fastavro.schemaless_reader(BytesIO(b"\x02"), s) == {"x": 1}
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    previous = _read.set_schemaless_plan_cache_size(4)
+    try:
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        _read.set_schemaless_plan_cache_size(previous)
+    assert errors == []

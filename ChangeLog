@@ -7,6 +7,9 @@ Unreleased
   the docs. Set FASTAVRO_READ_PLAN=0 to use the previous reader
 * Add fastavro.read.MessageReader to decode many schemaless messages that
   share a schema
+* Add read_plan=False to reader, block_reader, schemaless_reader and
+  MessageReader to use the previous reader for that reader or call only,
+  for example as the control group of an A/B test
 * Corrupt or cut-off input now always raises an error, where some cases used
   to return data: EOFError when the data ends early, IndexError for an
   invalid union or enum index, ValueError for an oversized number

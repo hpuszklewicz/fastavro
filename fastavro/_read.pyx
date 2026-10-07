@@ -1668,6 +1668,7 @@ def _iter_avro_records(
     named_schemas,
     reader_schema,
     options,
+    read_plan=True,
 ):
     cdef int32 i
 
@@ -1680,7 +1681,7 @@ def _iter_avro_records(
     # Compiled lazily so that schema resolution errors surface on the first
     # record, as they always have, rather than when the reader is created.
     cdef ReadPlan plan = None
-    if _READ_PLAN_ENABLED:
+    if _READ_PLAN_ENABLED and read_plan:
         plan = compile_read_plan(writer_schema, named_schemas, reader_schema, options)
 
     block_count = 0
@@ -1716,6 +1717,7 @@ def _iter_avro_blocks(
     named_schemas,
     reader_schema,
     options,
+    read_plan=True,
 ):
     sync_marker = header["sync"]
 
@@ -1743,6 +1745,7 @@ def _iter_avro_blocks(
         yield Block(
             block_bytes, num_block_records, codec, reader_schema,
             writer_schema, named_schemas, offset, size, options, plan_cell,
+            read_plan,
         )
 
 
@@ -1759,6 +1762,7 @@ class Block:
         size,
         options,
         plan_cell=None,
+        read_plan=True,
     ):
         self.bytes_ = bytes_
         self.num_records = num_records
@@ -1770,9 +1774,10 @@ class Block:
         self.size = size
         self.options = options
         self._plan_cell = plan_cell if plan_cell is not None else [None]
+        self._read_plan = read_plan
 
     def __iter__(self):
-        if not _READ_PLAN_ENABLED:
+        if not (_READ_PLAN_ENABLED and self._read_plan):
             return self._iter_generic()
         plan = self._plan_cell[0]
         if plan is None:
@@ -1877,6 +1882,7 @@ class reader(file_reader):
         handle_unicode_errors="strict",
         return_named_type=False,
         return_named_type_override=False,
+        read_plan=True,
     ):
         options = {
             "return_record_name": return_record_name,
@@ -1893,7 +1899,8 @@ class reader(file_reader):
                                          self.writer_schema,
                                          self._named_schemas,
                                          self.reader_schema,
-                                         self.options)
+                                         self.options,
+                                         read_plan)
 
 
 class block_reader(file_reader):
@@ -1906,6 +1913,7 @@ class block_reader(file_reader):
         handle_unicode_errors="strict",
         return_named_type=False,
         return_named_type_override=False,
+        read_plan=True,
     ):
         options = {
             "return_record_name": return_record_name,
@@ -1922,7 +1930,8 @@ class block_reader(file_reader):
                                         self.writer_schema,
                                         self._named_schemas,
                                         self.reader_schema,
-                                        self.options)
+                                        self.options,
+                                        read_plan)
 
 
 cpdef schemaless_reader(
@@ -1934,6 +1943,7 @@ cpdef schemaless_reader(
     handle_unicode_errors="strict",
     return_named_type=False,
     return_named_type_override=False,
+    bint read_plan=True,
 ):
     if writer_schema == reader_schema:
         # No need for the reader schema if they are the same
@@ -1959,6 +1969,7 @@ cpdef schemaless_reader(
     # other input keeps the generic reader.
     if (
         _READ_PLAN_ENABLED
+        and read_plan
         and isinstance(fo, BytesIO)
         and parsed_writer_schema is writer_schema
         and (parsed_reader_schema is None or parsed_reader_schema is reader_schema)
@@ -2000,10 +2011,12 @@ cdef class MessageReader:
 
     ``LOGICAL_READERS`` functions are bound when the instance is built; build
     a new instance to pick up a replacement.  If the compiled read plans are
-    disabled (``FASTAVRO_READ_PLAN=0`` or ``set_read_plan_enabled(False)``)
-    ``read`` uses the generic reader, which looks them up on every call.
+    disabled (``FASTAVRO_READ_PLAN=0`` or ``set_read_plan_enabled(False)``),
+    or the instance was built with ``read_plan=False``, ``read`` uses the
+    generic reader, which looks them up on every call.
     """
     cdef ReadPlan plan
+    cdef readonly bint read_plan
     cdef readonly object writer_schema
     cdef readonly object reader_schema
     cdef readonly dict options
@@ -2019,10 +2032,12 @@ cdef class MessageReader:
         handle_unicode_errors="strict",
         return_named_type=False,
         return_named_type_override=False,
+        read_plan=True,
     ):
         if writer_schema == reader_schema:
             # No need for the reader schema if they are the same
             reader_schema = None
+        self.read_plan = read_plan
         self.named_schemas = _default_named_schemas()
         self.writer_schema = parse_schema(writer_schema, self.named_schemas["writer"])
         self.reader_schema = None
@@ -2035,14 +2050,16 @@ cdef class MessageReader:
             "return_named_type": return_named_type,
             "return_named_type_override": return_named_type_override,
         }
-        self.plan = compile_read_plan(
-            self.writer_schema, self.named_schemas, self.reader_schema, self.options
-        )
+        self.plan = None
+        if read_plan:
+            self.plan = compile_read_plan(
+                self.writer_schema, self.named_schemas, self.reader_schema, self.options
+            )
 
     def __reduce__(self):
         # Pickled as its arguments; the plan is compiled again when unpickled.
         return (
-            partial(MessageReader, **self.options),
+            partial(MessageReader, read_plan=self.read_plan, **self.options),
             (self.writer_schema, self.reader_schema),
         )
 
@@ -2052,7 +2069,7 @@ cdef class MessageReader:
         cdef Cursor c
         if type(data) is not bytes:
             data = bytes(data)
-        if not _READ_PLAN_ENABLED:
+        if not _READ_PLAN_ENABLED or self.plan is None:
             return _read_data(
                 BytesIO(data),
                 self.writer_schema,

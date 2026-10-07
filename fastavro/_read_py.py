@@ -1043,6 +1043,13 @@ class reader(file_reader[AvroMessage]):
         Default `strict`. Should be set to a valid string that can be used in
         the errors argument of the string decode() function. Examples include
         `replace` and `ignore`
+    read_plan
+        Default `True`. On CPython, decode with a compiled read plan where one
+        applies (see "Compiled read plans" in the docs). If false, use the
+        previous reader for this reader only, for example as the control in an
+        A/B test. ``FASTAVRO_READ_PLAN=0`` and ``set_read_plan_enabled(False)``
+        still turn read plans off everywhere. The pure-Python implementation
+        ignores it.
 
 
     Example::
@@ -1091,6 +1098,7 @@ class reader(file_reader[AvroMessage]):
         handle_unicode_errors: str = "strict",
         return_named_type: bool = False,
         return_named_type_override: bool = False,
+        read_plan: bool = True,
     ):
         options = {
             "return_record_name": return_record_name,
@@ -1170,6 +1178,13 @@ class block_reader(file_reader[Block]):
         Default `strict`. Should be set to a valid string that can be used in
         the errors argument of the string decode() function. Examples include
         `replace` and `ignore`
+    read_plan
+        Default `True`. On CPython, decode with a compiled read plan where one
+        applies (see "Compiled read plans" in the docs). If false, use the
+        previous reader for this reader only, for example as the control in an
+        A/B test. ``FASTAVRO_READ_PLAN=0`` and ``set_read_plan_enabled(False)``
+        still turn read plans off everywhere. The pure-Python implementation
+        ignores it.
 
 
     Example::
@@ -1206,6 +1221,7 @@ class block_reader(file_reader[Block]):
         handle_unicode_errors: str = "strict",
         return_named_type: bool = False,
         return_named_type_override: bool = False,
+        read_plan: bool = True,
     ):
         options = {
             "return_record_name": return_record_name,
@@ -1238,6 +1254,7 @@ def schemaless_reader(
     handle_unicode_errors: str = "strict",
     return_named_type: bool = False,
     return_named_type_override: bool = False,
+    read_plan: bool = True,
 ) -> AvroMessage:
     """Reads a single record written using the
     :meth:`~fastavro._write_py.schemaless_writer`
@@ -1276,6 +1293,13 @@ def schemaless_reader(
         Default `strict`. Should be set to a valid string that can be used in
         the errors argument of the string decode() function. Examples include
         `replace` and `ignore`
+    read_plan
+        Default `True`. On CPython, decode with a compiled read plan where one
+        applies (see "Compiled read plans" in the docs). If false, use the
+        previous reader for this call only, for example as the control in an
+        A/B test. ``FASTAVRO_READ_PLAN=0`` and ``set_read_plan_enabled(False)``
+        still turn read plans off everywhere. The pure-Python implementation
+        ignores it.
 
 
     Example::
@@ -1325,9 +1349,10 @@ class MessageReader:
         reader = MessageReader(parsed_writer_schema)
         record = reader.read(payload)
 
-    On CPython the compiled read plan is built once here as well.  Trailing
-    bytes after the datum are ignored.  Instances are immutable after
-    construction.
+    On CPython the compiled read plan is built once here as well, unless
+    ``read_plan=False`` (as for ``reader``), which makes ``read`` use the
+    previous reader.  Trailing bytes after the datum are ignored.  Instances
+    are immutable after construction.
     """
 
     def __init__(
@@ -1340,10 +1365,12 @@ class MessageReader:
         handle_unicode_errors: str = "strict",
         return_named_type: bool = False,
         return_named_type_override: bool = False,
+        read_plan: bool = True,
     ):
         if writer_schema == reader_schema:
             # No need for the reader schema if they are the same
             reader_schema = None
+        self.read_plan = read_plan
         self._named_schemas: Dict[str, NamedSchemas] = _default_named_schemas()
         self.writer_schema = parse_schema(writer_schema, self._named_schemas["writer"])
         self.reader_schema = None

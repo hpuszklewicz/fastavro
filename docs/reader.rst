@@ -48,7 +48,12 @@ To switch back to the previous reader, for example to compare results:
 * set ``FASTAVRO_READ_PLAN=0`` in the environment before ``fastavro`` is
   imported, or
 * call ``fastavro.read.set_read_plan_enabled(False)``
-  (``read_plan_enabled()`` reports the current state).
+  (``read_plan_enabled()`` reports the current state), or
+* for a single reader or call, pass ``read_plan=False`` to ``reader``,
+  ``block_reader``, ``schemaless_reader`` or ``MessageReader``. Nothing global
+  changes, so a threaded service can decode some messages each way, for
+  example as the control group of an A/B test. The two settings above still
+  turn read plans off everywhere.
 
 Both do nothing on the pure-Python implementation (PyPy), which does not have
 read plans.

@@ -84,15 +84,15 @@ def test_replacing_a_logical_reader_is_seen_by_cached_plans():
 
 
 def test_cache_is_keyed_by_schema_identity_and_evicts_oldest_first():
-    previous = _read.set_schemaless_plan_cache_size(0)  # start empty
-    _read.set_schemaless_plan_cache_size(4)
+    previous = fastavro.read.set_schemaless_plan_cache_size(0)  # start empty
+    fastavro.read.set_schemaless_plan_cache_size(4)
     try:
         fields = [{"name": "x", "type": "int"}]
         schemas = [parsed(fields) for _ in range(6)]
         assert all(
             fastavro.schemaless_reader(BytesIO(b"\x02"), s) == {"x": 1} for s in schemas
         )
-        assert _read.schemaless_plan_cache_info() == {"size": 4, "capacity": 4}
+        assert fastavro.read.schemaless_plan_cache_info() == {"size": 4, "capacity": 4}
         # A cached entry keeps its schema alive, so evicted schemas have fewer
         # references than cached ones: the two oldest were evicted. (A for loop
         # above would leave its variable referencing the last schema.)
@@ -101,14 +101,14 @@ def test_cache_is_keyed_by_schema_identity_and_evicts_oldest_first():
         fastavro.schemaless_reader(
             BytesIO(b"\x02"), schemas[5], return_record_name=True
         )
-        assert _read.schemaless_plan_cache_info()["size"] == 4
+        assert fastavro.read.schemaless_plan_cache_info()["size"] == 4
         assert sys.getrefcount(schemas[2]) == sys.getrefcount(schemas[0])
-        _read.set_schemaless_plan_cache_size(0)
-        assert _read.schemaless_plan_cache_info()["size"] == 0
+        fastavro.read.set_schemaless_plan_cache_size(0)
+        assert fastavro.read.schemaless_plan_cache_info()["size"] == 0
         assert fastavro.schemaless_reader(BytesIO(b"\x02"), schemas[0]) == {"x": 1}
-        assert _read.schemaless_plan_cache_info()["size"] == 0
+        assert fastavro.read.schemaless_plan_cache_info()["size"] == 0
     finally:
-        _read.set_schemaless_plan_cache_size(previous)
+        fastavro.read.set_schemaless_plan_cache_size(previous)
 
 
 def test_schemaless_read_does_not_copy_the_buffer():
@@ -137,8 +137,8 @@ def test_replaced_logical_readers_do_not_pile_up_in_the_cache(capacity):
     key = "int-cache-churn-probe"
     logical = {"type": "int", "logicalType": "cache-churn-probe"}
     schemas = [parsed([{"name": "x", "type": logical}]) for _ in range(3)]
-    previous = _read.set_schemaless_plan_cache_size(0)  # start empty
-    _read.set_schemaless_plan_cache_size(capacity)
+    previous = fastavro.read.set_schemaless_plan_cache_size(0)  # start empty
+    fastavro.read.set_schemaless_plan_cache_size(capacity)
 
     def churn(rounds):
         for _ in range(rounds):
@@ -152,11 +152,11 @@ def test_replaced_logical_readers_do_not_pile_up_in_the_cache(capacity):
         churn(5000)
         grown, _ = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        assert _read.schemaless_plan_cache_info()["size"] == min(capacity, 3)
+        assert fastavro.read.schemaless_plan_cache_info()["size"] == min(capacity, 3)
         assert grown < 64 * 1024
     finally:
         LOGICAL_READERS.pop(key, None)
-        _read.set_schemaless_plan_cache_size(previous)
+        fastavro.read.set_schemaless_plan_cache_size(previous)
 
 
 def test_concurrent_reads_while_the_cache_evicts():
@@ -174,7 +174,7 @@ def test_concurrent_reads_while_the_cache_evicts():
         except Exception as e:  # noqa: BLE001
             errors.append(e)
 
-    previous = _read.set_schemaless_plan_cache_size(4)
+    previous = fastavro.read.set_schemaless_plan_cache_size(4)
     try:
         threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
         for t in threads:
@@ -182,7 +182,7 @@ def test_concurrent_reads_while_the_cache_evicts():
         for t in threads:
             t.join()
     finally:
-        _read.set_schemaless_plan_cache_size(previous)
+        fastavro.read.set_schemaless_plan_cache_size(previous)
     assert errors == []
 
 
@@ -192,7 +192,9 @@ def test_cache_capacity_default_and_environment_variable(setting, capacity):
     env = {k: v for k, v in os.environ.items() if k != "FASTAVRO_SCHEMALESS_PLAN_CACHE"}
     if setting is not None:
         env["FASTAVRO_SCHEMALESS_PLAN_CACHE"] = setting
-    code = "from fastavro.read import _read; print(_read.schemaless_plan_cache_info()['capacity'])"
+    code = (
+        "import fastavro.read as r; print(r.schemaless_plan_cache_info()['capacity'])"
+    )
     out = subprocess.run(
         [sys.executable, "-c", code],
         env=env,

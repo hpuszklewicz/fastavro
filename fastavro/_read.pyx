@@ -1026,8 +1026,7 @@ cdef class ReadPlan:
     cdef int promote
     cdef Py_ssize_t size                 # fixed
     cdef list enum_symbols               # enum: writer symbols
-    cdef list enum_resolved              # enum with reader: per index symbol/default or None
-    cdef list enum_errors                # enum with reader: per index error message or None
+    cdef list enum_resolved              # enum with reader: per index symbol/default, None = error
     cdef ReadPlan child                  # array items / map values
     cdef list branches                   # union: ReadPlan per writer branch
     cdef list branch_names               # union: name to wrap with, or None
@@ -1172,25 +1171,16 @@ cdef ReadPlan _build_plan(
         plan.enum_symbols = list(writer_schema["symbols"])
         if reader_schema:
             resolved = []
-            errors = []
-            reader_symbols = reader_schema["symbols"]
+            reader_symbol_set = set(reader_schema["symbols"])
+            default = reader_schema.get("default")
             for symbol in plan.enum_symbols:
-                if symbol in reader_symbols:
+                if symbol in reader_symbol_set:
                     resolved.append(symbol)
-                    errors.append(None)
+                elif default:
+                    resolved.append(default)
                 else:
-                    default = reader_schema.get("default")
-                    if default:
-                        resolved.append(default)
-                        errors.append(None)
-                    else:
-                        resolved.append(None)
-                        errors.append(
-                            f"{symbol} not found in reader symbol list "
-                            f"{reader_schema['name']}, known symbols: {reader_symbols}"
-                        )
+                    resolved.append(None)  # error, message built when raised
             plan.enum_resolved = resolved
-            plan.enum_errors = errors
     elif record_type == "array":
         plan = ReadPlan()
         plan.kind = K_ARRAY
@@ -1461,7 +1451,11 @@ cdef object _exec_plan(Cursor c, ReadPlan p):
         else:
             data = <object>PyList_GET_ITEM(p.enum_resolved, n)
             if data is None:
-                raise SchemaResolutionError(<object>PyList_GET_ITEM(p.enum_errors, n))
+                symbol = <object>PyList_GET_ITEM(p.enum_symbols, n)
+                raise SchemaResolutionError(
+                    f"{symbol} not found in reader symbol list "
+                    f"{p.reader_schema['name']}, known symbols: {p.reader_schema['symbols']}"
+                )
     else:  # K_ERROR
         raise SchemaResolutionError(p.error_message)
 

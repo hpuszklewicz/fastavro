@@ -415,3 +415,60 @@ def test_memory_is_stable_across_repeated_decodes():
         peaks.append(tracemalloc.get_traced_memory()[1])
     tracemalloc.stop()
     assert peaks[-1] <= peaks[1] * 1.05
+
+
+def test_enum_error_message_matches_generic_reader():
+    schema = fastavro.parse_schema(
+        {
+            "type": "record",
+            "name": "R",
+            "fields": [
+                {
+                    "name": "e",
+                    "type": {"type": "enum", "name": "E", "symbols": ["A", "B", "C"]},
+                }
+            ],
+        }
+    )
+    reader = fastavro.parse_schema(
+        {
+            "type": "record",
+            "name": "R",
+            "fields": [
+                {
+                    "name": "e",
+                    "type": {"type": "enum", "name": "E", "symbols": ["A", "B"]},
+                }
+            ],
+        }
+    )
+    messages = []
+    for enabled in (True, False):
+        with pytest.raises(SchemaResolutionError) as error:
+            with_plan(
+                enabled,
+                lambda: fastavro.schemaless_reader(BytesIO(b"\x04"), schema, reader),
+            )
+        messages.append(str(error.value))
+    assert (
+        messages[0]
+        == messages[1]
+        == ("C not found in reader symbol list E, known symbols: ['A', 'B']")
+    )
+
+
+def test_enum_plan_size_does_not_depend_on_missing_symbols():
+    # The "not found" message lists every reader symbol; built at compile time
+    # for each missing writer symbol, a 5,000-symbol plan held over 50 MiB.
+    writer = fastavro.parse_schema(
+        {"type": "enum", "name": "E", "symbols": [f"S{i}" for i in range(5000)]}
+    )
+    reader = fastavro.parse_schema(
+        {"type": "enum", "name": "E", "symbols": [f"S{i}" for i in range(0, 5000, 2)]}
+    )
+    tracemalloc.start()
+    plan = _read.compile_read_plan(writer, {"writer": {}, "reader": {}}, reader, {})
+    held, _ = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert plan is not None
+    assert held < 512 * 1024

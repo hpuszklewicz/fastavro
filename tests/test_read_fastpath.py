@@ -1,5 +1,7 @@
+import os
 import pickle
 import random
+import subprocess
 import sys
 import threading
 import tracemalloc
@@ -182,3 +184,20 @@ def test_concurrent_reads_while_the_cache_evicts():
     finally:
         _read.set_schemaless_plan_cache_size(previous)
     assert errors == []
+
+
+@pytest.mark.parametrize("setting,capacity", [(None, 3072), ("100", 100)])
+def test_cache_capacity_default_and_environment_variable(setting, capacity):
+    # The variable is read when fastavro is imported: check in a new process.
+    env = {k: v for k, v in os.environ.items() if k != "FASTAVRO_SCHEMALESS_PLAN_CACHE"}
+    if setting is not None:
+        env["FASTAVRO_SCHEMALESS_PLAN_CACHE"] = setting
+    code = "from fastavro.read import _read; print(_read.schemaless_plan_cache_info()['capacity'])"
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert int(out.stdout) == capacity

@@ -31,7 +31,7 @@ times faster. It is used by:
 * ``schemaless_reader``: only when it is given a ``BytesIO`` and a record
   schema that went through ``parse_schema``. Parse the schema once and reuse
   it; parsing it on every call is slower than before. Plans are kept in a
-  cache of 2048 entries (``FASTAVRO_SCHEMALESS_PLAN_CACHE`` changes the size);
+  cache of 3072 entries (``FASTAVRO_SCHEMALESS_PLAN_CACHE`` changes the size);
 * ``MessageReader``: one plan, prepared when it is created, for any schema.
   Keeping one ``MessageReader`` per schema is the fastest way to decode many
   messages.

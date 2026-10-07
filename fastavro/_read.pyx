@@ -1577,7 +1577,7 @@ cdef dict _SCHEMALESS_PLANS = {}
 cdef object _SCHEMALESS_ORDER = deque()
 cdef cython.pymutex _SCHEMALESS_LOCK
 cdef Py_ssize_t _SCHEMALESS_PLANS_MAX = int(
-    os.environ.get("FASTAVRO_SCHEMALESS_PLAN_CACHE", "2048")
+    os.environ.get("FASTAVRO_SCHEMALESS_PLAN_CACHE", "3072")
 )
 
 

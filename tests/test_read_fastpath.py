@@ -203,3 +203,49 @@ def test_cache_capacity_default_and_environment_variable(setting, capacity):
         check=True,
     )
     assert int(out.stdout) == capacity
+
+
+# A logical reader whose finalizer uses the plan cache, freed when the only
+# cached plan that holds it leaves the cache in one of three ways.
+LOCK_PROBE = r"""
+import sys
+from io import BytesIO
+import fastavro
+from fastavro.read import LOGICAL_READERS, set_schemaless_plan_cache_size
+
+class Reader:
+    def __call__(self, data, writer_schema, reader_schema):
+        return data
+    def __del__(self):
+        set_schemaless_plan_cache_size(set_schemaless_plan_cache_size(4))
+
+def schema(name):
+    logical = {"type": "int", "logicalType": "lock-probe"}
+    return fastavro.parse_schema(
+        {"type": "record", "name": name, "fields": [{"name": "x", "type": logical}]}
+    )
+
+set_schemaless_plan_cache_size(1)
+LOGICAL_READERS["int-lock-probe"] = Reader()
+first = schema("A")
+fastavro.schemaless_reader(BytesIO(b"\x02"), first)
+LOGICAL_READERS["int-lock-probe"] = lambda data, w, r: data  # cache holds the last ref
+if sys.argv[1] == "resize":
+    set_schemaless_plan_cache_size(0)
+elif sys.argv[1] == "insert":
+    fastavro.schemaless_reader(BytesIO(b"\x02"), schema("B"))  # evicts the first
+else:
+    fastavro.schemaless_reader(BytesIO(b"\x02"), first)  # stale: rebuilt
+print("done")
+"""
+
+
+@pytest.mark.parametrize("path", ["resize", "insert", "invalidate"])
+def test_entries_leaving_the_cache_are_released_outside_its_lock(path):
+    out = subprocess.run(
+        [sys.executable, "-c", LOCK_PROBE, path],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.stdout.strip() == "done", out.stderr

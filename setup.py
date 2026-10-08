@@ -32,7 +32,7 @@ def version():
     assert match, f"cannot find version in {pyfile}"
     vinfo = ast.literal_eval(match.group(1))
     # Unofficial preview build: a local version label, which PyPI does not accept.
-    return ".".join(str(v) for v in vinfo) + "+readplan.1"
+    return ".".join(str(v) for v in vinfo) + "+readplan.2"
 
 
 setup(

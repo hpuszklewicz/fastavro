@@ -8,6 +8,18 @@ from . import logical_readers
 from . import _read_common
 
 # Private API
+# Compiled read plans (Cython only). On the pure-Python implementation these
+# are no-ops that report False.
+set_read_plan_enabled = getattr(_read, "set_read_plan_enabled", lambda enabled: False)
+read_plan_enabled = getattr(_read, "read_plan_enabled", lambda: False)
+# The schemaless_reader plan cache (Cython only). The pure-Python
+# implementation has no cache: these report a size and capacity of 0.
+set_schemaless_plan_cache_size = getattr(
+    _read, "set_schemaless_plan_cache_size", lambda size: 0
+)
+schemaless_plan_cache_info = getattr(
+    _read, "schemaless_plan_cache_info", lambda: {"size": 0, "capacity": 0}
+)
 HEADER_SCHEMA = _read_common.HEADER_SCHEMA
 SYNC_SIZE = _read_common.SYNC_SIZE
 MAGIC = _read_common.MAGIC
@@ -17,6 +29,7 @@ BLOCK_READERS = _read.BLOCK_READERS
 reader = iter_avro = _read.reader
 block_reader = _read.block_reader
 schemaless_reader = _read.schemaless_reader
+MessageReader = _read.MessageReader
 json_reader = json_read.json_reader
 is_avro = _read.is_avro
 LOGICAL_READERS = logical_readers.LOGICAL_READERS
@@ -25,6 +38,7 @@ SchemaResolutionError = _read_common.SchemaResolutionError
 __all__ = [
     "reader",
     "schemaless_reader",
+    "MessageReader",
     "is_avro",
     "block_reader",
     "SchemaResolutionError",

@@ -42,6 +42,7 @@ class reader(file_reader[AvroMessage]):
         handle_unicode_errors: str = ...,
         return_named_type: bool = ...,
         return_named_type_override: bool = ...,
+        read_plan: bool = ...,
     ): ...
 
 class block_reader(file_reader[Block]):
@@ -54,6 +55,7 @@ class block_reader(file_reader[Block]):
         handle_unicode_errors: str = ...,
         return_named_type: bool = ...,
         return_named_type_override: bool = ...,
+        read_plan: bool = ...,
     ): ...
 
 class Block:
@@ -85,7 +87,32 @@ def schemaless_reader(
     handle_unicode_errors: str = ...,
     return_named_type: bool = ...,
     return_named_type_override: bool = ...,
+    read_plan: bool = ...,
 ) -> AvroMessage: ...
 def is_avro(path_or_buffer: Union[str, IO]) -> bool: ...
+
+class MessageReader:
+    read_plan: bool
+    writer_schema: Schema
+    reader_schema: Optional[Schema]
+    options: Dict[str, Any]
+    def __init__(
+        self,
+        writer_schema: Schema,
+        reader_schema: Optional[Schema] = ...,
+        *,
+        return_record_name: bool = ...,
+        return_record_name_override: bool = ...,
+        handle_unicode_errors: str = ...,
+        return_named_type: bool = ...,
+        return_named_type_override: bool = ...,
+        read_plan: bool = ...,
+    ): ...
+    def read(self, data: bytes) -> AvroMessage: ...
+
+def set_read_plan_enabled(enabled: bool) -> bool: ...
+def read_plan_enabled() -> bool: ...
+def set_schemaless_plan_cache_size(size: int) -> int: ...
+def schemaless_plan_cache_info() -> Dict[str, int]: ...
 
 BLOCK_READERS: Dict[str, Callable]

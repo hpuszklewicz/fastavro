@@ -29,11 +29,13 @@ times faster. It is used by:
 * ``reader`` (``iter_avro``) and ``block_reader``: one plan per file, so files
   with only a few records gain little;
 * ``schemaless_reader``: only when it is given an ``io.BytesIO`` (not a
-  subclass) and a record schema that went through ``parse_schema``. Parse the schema once and reuse
-  it; parsing it on every call is slower than before. Plans are kept in a
-  cache of 3072 entries. To change its size, set
-  ``FASTAVRO_SCHEMALESS_PLAN_CACHE`` before ``fastavro`` is imported, or call
-  ``fastavro.read.set_schemaless_plan_cache_size()``
+  subclass) and a record schema that went through ``parse_schema``. Parse the
+  schema once and reuse it; parsing it on every call is slower than before.
+  Treat a parsed schema as read-only once it has been used: its plan is
+  cached, so later changes to it are not seen. To use a changed schema, parse
+  it again. Plans are kept in a cache of 3072 entries. To change its size,
+  set ``FASTAVRO_SCHEMALESS_PLAN_CACHE`` before ``fastavro`` is imported, or
+  call ``fastavro.read.set_schemaless_plan_cache_size()``
   (``schemaless_plan_cache_info()`` reports the size and capacity);
 * ``MessageReader``: one plan, prepared when it is created, for any schema.
   Keeping one ``MessageReader`` per schema is the fastest way to decode many

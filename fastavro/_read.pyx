@@ -1576,10 +1576,12 @@ cdef object _read_one_from_bytesio(fo, ReadPlan plan):
 
 # (writer_schema, reader_schema, options) -> plan, keyed by object identity.
 # Entries keep references to the schema objects so an id cannot be reused by
-# a different object while it is cached.  When full, the oldest entry is
-# evicted.  Each entry also records the LOGICAL_READERS functions the plan
-# captured, so replacing a registered reader invalidates the entry on its
-# next use, as the generic reader would see the replacement immediately.
+# a different object while it is cached.  Parsed schemas are assumed not to
+# change once used (the documentation says so): their contents are not
+# checked again.  When full, the oldest entry is evicted.  Each entry also
+# records the LOGICAL_READERS function (or None) of every logical type in the
+# plan, so replacing, removing or registering a reader invalidates the entry
+# on its next use, as the generic reader would see the change immediately.
 #
 # _SCHEMALESS_ORDER holds the keys in insertion order, so evicting the oldest
 # entry is O(1): next(iter(dict)) walks past every slot already deleted from

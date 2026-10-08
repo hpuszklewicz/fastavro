@@ -1389,10 +1389,13 @@ cdef inline long64 _c_read_long(Cursor c) except? -1:
 
 cdef inline unicode _c_read_utf8(Cursor c, const char* errors):
     cdef long64 size = _c_read_long(c)
+    cdef Py_ssize_t start
     _need(c, size)
-    s = PyUnicode_DecodeUTF8(<const char*>(c.buf + c.pos), size, errors)
+    # Past the bytes before decoding them, as the generic reader reads them
+    # first: after a UnicodeDecodeError the stream is past the string too.
+    start = c.pos
     c.pos += size
-    return s
+    return PyUnicode_DecodeUTF8(<const char*>(c.buf + start), size, errors)
 
 
 cdef object _exec_plan(Cursor c, ReadPlan p):

@@ -574,3 +574,20 @@ def test_compile_errors_are_raised_when_a_datum_reaches_them(recursive):
             message_reader.read(record)
         errors.append(error.value)
     assert errors[0] is not errors[1]
+
+
+def test_stream_position_after_a_unicode_error_matches_generic_reader():
+    schema = fastavro.parse_schema(
+        {
+            "type": "record",
+            "name": "R",
+            "fields": [{"name": "s", "type": "string"}, {"name": "n", "type": "int"}],
+        }
+    )
+    positions = []
+    for enabled in (True, False):
+        fo = BytesIO(b"\x04\xff\xfe\x02")  # a 2-byte string that is not UTF-8
+        with pytest.raises(UnicodeDecodeError):
+            with_plan(enabled, lambda: fastavro.schemaless_reader(fo, schema))
+        positions.append(fo.tell())
+    assert positions == [3, 3]

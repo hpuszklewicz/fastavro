@@ -1647,13 +1647,15 @@ def schemaless_plan_cache_info():
     return {"size": len(_SCHEMALESS_PLANS), "capacity": _SCHEMALESS_PLANS_MAX}
 
 
-cdef list _logical_readers_used(ReadPlan plan, list out, set seen):
-    """(key, function) pairs captured by the plan tree, for cache validation."""
+cdef dict _logical_readers_used(ReadPlan plan, dict out, set seen):
+    """{logical type: function, or None if none was registered} for every
+    logical type in the plan tree, for cache validation: replacing, removing
+    or registering a reader invalidates the plan."""
     if plan is None or id(plan) in seen:
         return out
     seen.add(id(plan))
-    if plan.logical_fn is not None:
-        out.append((extract_logical_type(plan.writer_schema), plan.logical_fn))
+    if isinstance(plan.writer_schema, dict) and "logicalType" in plan.writer_schema:
+        out[extract_logical_type(plan.writer_schema)] = plan.logical_fn
     _logical_readers_used(plan.child, out, seen)
     for sub in plan.branches or ():
         _logical_readers_used(<ReadPlan>sub, out, seen)
@@ -1685,7 +1687,8 @@ cdef ReadPlan _schemaless_plan(writer_schema, reader_schema, dict named_schemas,
     plan = _build_plan(writer_schema, reader_schema, named_schemas, options, {})
     if _SCHEMALESS_PLANS_MAX <= 0:
         return plan
-    entry = (writer_schema, reader_schema, plan, _logical_readers_used(plan, [], set()), key)
+    used = list(_logical_readers_used(plan, {}, set()).items())
+    entry = (writer_schema, reader_schema, plan, used, key)
     removed = []
     with _SCHEMALESS_LOCK:
         _evict_to(_SCHEMALESS_PLANS_MAX - 1, removed)

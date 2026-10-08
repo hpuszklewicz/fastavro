@@ -83,6 +83,22 @@ def test_replacing_a_logical_reader_is_seen_by_cached_plans():
         LOGICAL_READERS.pop(key, None)
 
 
+def test_logical_reader_registered_after_a_plan_was_cached_is_used():
+    key = "int-late-probe"
+    schema = parsed(
+        [{"name": "x", "type": {"type": "int", "logicalType": "late-probe"}}]
+    )
+    try:
+        assert fastavro.schemaless_reader(BytesIO(b"\x02"), schema) == {"x": 1}
+        LOGICAL_READERS[key] = lambda data, w, r: ("late", data)
+        assert fastavro.schemaless_reader(BytesIO(b"\x02"), schema) == {
+            "x": ("late", 1)
+        }
+    finally:
+        LOGICAL_READERS.pop(key, None)
+    assert fastavro.schemaless_reader(BytesIO(b"\x02"), schema) == {"x": 1}
+
+
 def test_cache_is_keyed_by_schema_identity_and_evicts_oldest_first():
     previous = fastavro.read.set_schemaless_plan_cache_size(0)  # start empty
     fastavro.read.set_schemaless_plan_cache_size(4)

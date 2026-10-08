@@ -13,6 +13,9 @@ jobs:
   test:
     name: test ${{ matrix.py }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Preview builds: the release steps below create the release and upload to it.
+    permissions:
+      contents: write
     strategy:
       matrix:
         os:
@@ -67,7 +70,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          curl -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{github.repository}}/releases -d '{"tag_name": "${{github.event.ref}}"}'
+          curl -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{github.repository}}/releases -d '{"tag_name": "${{github.event.ref}}", "name": "Unofficial preview: fastavro with read plans (${{github.event.ref}})", "prerelease": true, "body": "Unofficial preview of fastavro with compiled read plans, for testing. Not an official fastavro release. Details: https://github.com/hpuszklewicz/fastavro/pull/1"}'
       - name: Get release id
         if: ${{ github.event_name == 'create' && github.event.ref_type == 'tag' && matrix.py != 'pypy-3.11' && matrix.os == 'windows-latest' }}
         id: get_release_id
@@ -84,3 +87,5 @@ jobs:
           tag: ${{ github.ref }}
           overwrite: true
           file_glob: true
+          prerelease: true
+          release_name: "Unofficial preview: fastavro with read plans (${{ github.ref_name }})"

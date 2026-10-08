@@ -16,18 +16,19 @@ jobs:
     strategy:
       matrix:
         py:
+          - "3.15"
           - "3.14t"
           - 3.14
           - 3.13
           - 3.12
           - 3.11
-          - "3.10"
           - pypy-3.11
     steps:
       - name: Setup Python for test ${{ matrix.py }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.py }}
+          allow-prereleases: ${{ matrix.py == '3.15' }}
       - uses: actions/checkout@v7
       - name: Install Testing Dependencies
         if: ${{ ! endsWith(matrix.py, 't') }}
@@ -42,7 +43,7 @@ jobs:
         if: ${{ endsWith(matrix.py, 't') }}
         run: SKIP_BLACK="1" ./freethreading-run-tests.sh
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
@@ -53,12 +54,12 @@ jobs:
     strategy:
       matrix:
         py:
-          - 310
           - 311
           - 312
           - 313
           - 314
           - 314t
+          - 315
         qemu:
           - x86_64
           - aarch64
@@ -77,18 +78,10 @@ jobs:
           make clean
           make all
       - name: Build wheels
-        if: ${{ ! endsWith(matrix.py, 't') }}
-        uses: pypa/cibuildwheel@v3.4.1
+        uses: pypa/cibuildwheel@v4.2.1
         env:
           CIBW_ARCHS_LINUX: ${{ matrix.qemu }}
-          CIBW_BUILD: "*${{ matrix.py }}*${{ matrix.libc }}*"
-      - name: Build wheels
-        if: ${{ endsWith(matrix.py, 't') }}
-        uses: pypa/cibuildwheel@v3.4.1
-        env:
-          CIBW_ARCHS_LINUX: ${{ matrix.qemu }}
-          CIBW_BUILD: "*${{ matrix.py }}*${{ matrix.libc }}*"
-          CIBW_ENABLE: cpython-freethreading
+          CIBW_BUILD: "cp${{ matrix.py }}-${{ matrix.libc }}*"
       - name: Archive all wheels
         uses: actions/upload-artifact@v7
         with:

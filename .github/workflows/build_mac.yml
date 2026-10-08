@@ -16,18 +16,19 @@ jobs:
     strategy:
       matrix:
         py:
+          - "3.15"
           - "3.14t"
           - 3.14
           - 3.13
           - 3.12
           - 3.11
-          - "3.10"
           - pypy-3.11
     steps:
       - name: Setup Python for test ${{ matrix.py }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.py }}
+          allow-prereleases: ${{ matrix.py == '3.15' }}
       - uses: actions/checkout@v7
       - name: Install numpy for pypy3
         if: ${{ matrix.py == 'pypy-3.11' }}
@@ -47,7 +48,7 @@ jobs:
         if: ${{ endsWith(matrix.py, 't') }}
         run: SKIP_BLACK="1" ./freethreading-run-tests.sh
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Make Wheel

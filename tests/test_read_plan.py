@@ -472,3 +472,56 @@ def test_enum_plan_size_does_not_depend_on_missing_symbols():
     tracemalloc.stop()
     assert plan is not None
     assert held < 512 * 1024
+
+
+@pytest.mark.parametrize(
+    "reader_type,payload",
+    [(["null", "int"], b"\x02\x02a"), ("int", b"\x00")],
+    ids=["reader union", "reader not a union"],
+)
+def test_union_mismatch_message_matches_generic_reader(reader_type, payload):
+    def record(field_type):
+        return fastavro.parse_schema(
+            {
+                "type": "record",
+                "name": "R",
+                "fields": [{"name": "u", "type": field_type}],
+            }
+        )
+
+    writer, reader = record(["null", "string"]), record(reader_type)
+    messages = []
+    for enabled in (True, False):
+        with pytest.raises(SchemaResolutionError) as error:
+            with_plan(
+                enabled,
+                lambda: fastavro.schemaless_reader(BytesIO(payload), writer, reader),
+            )
+        messages.append(str(error.value))
+    assert messages[0] == messages[1]
+
+
+def test_union_plan_size_does_not_grow_with_incompatible_branches():
+    # Each incompatible branch used to get its own message repeating the whole
+    # writer union: 500 record branches held almost 19 MiB.
+    branches = [
+        {"type": "record", "name": f"R{i}", "fields": [{"name": "x", "type": "int"}]}
+        for i in range(500)
+    ]
+
+    def record(field_type):
+        return fastavro.parse_schema(
+            {
+                "type": "record",
+                "name": "Top",
+                "fields": [{"name": "u", "type": field_type}],
+            }
+        )
+
+    writer, reader = record(["null", *branches]), record(["null"])
+    tracemalloc.start()
+    message_reader = fastavro.read.MessageReader(writer, reader)
+    held, _ = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert message_reader.read(b"\x00") == {"u": None}
+    assert held < 1024 * 1024

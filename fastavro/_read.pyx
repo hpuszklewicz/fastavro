@@ -1055,6 +1055,22 @@ cdef ReadPlan _error_plan(message):
     return p
 
 
+cdef ReadPlan _union_mismatch_plan(writer_schema, reader_schema):
+    """Shared by every writer branch of a union that the reader cannot read.
+    The message repeats both schemas, so it is built only when raised."""
+    cdef ReadPlan p = ReadPlan()
+    p.kind = K_ERROR
+    p.writer_schema = writer_schema
+    p.reader_schema = reader_schema
+    return p
+
+
+cdef object _error_message(ReadPlan p):
+    if p.error_message is not None:
+        return p.error_message
+    return f"schema mismatch: {p.writer_schema} not found in {p.reader_schema}"
+
+
 cdef str _branch_name(idx_schema, idx_reader_schema, named_schemas, bint use_reader_lookup):
     if idx_reader_schema is not None:
         if isinstance(idx_reader_schema, dict):
@@ -1074,6 +1090,7 @@ cdef ReadPlan _build_plan(
 ):
     cdef ReadPlan plan
     cdef ReadPlan sub
+    cdef ReadPlan union_error
     cdef list branches, branch_names
     cdef list field_names, field_plans
     cdef list default_names, default_values
@@ -1208,6 +1225,7 @@ cdef ReadPlan _build_plan(
         rnt = options.get("return_named_type")
         single_name = is_single_name_union(writer_schema) if rnt_override else False
         single_record = is_single_record_union(writer_schema) if rnn_override else False
+        union_error = None
         for idx_schema in writer_schema:
             idx_reader_schema = None
             if reader_schema:
@@ -1215,9 +1233,9 @@ cdef ReadPlan _build_plan(
                     if match_types(idx_schema, reader_schema, named_schemas):
                         sub = _build_plan(idx_schema, reader_schema, named_schemas, options, memo)
                     else:
-                        sub = _error_plan(
-                            f"schema mismatch: {writer_schema} not found in {reader_schema}"
-                        )
+                        if union_error is None:
+                            union_error = _union_mismatch_plan(writer_schema, reader_schema)
+                        sub = union_error
                 else:
                     for schema in reader_schema:
                         if match_types(idx_schema, schema, named_schemas):
@@ -1225,9 +1243,9 @@ cdef ReadPlan _build_plan(
                             sub = _build_plan(idx_schema, schema, named_schemas, options, memo)
                             break
                     else:
-                        sub = _error_plan(
-                            f"schema mismatch: {writer_schema} not found in {reader_schema}"
-                        )
+                        if union_error is None:
+                            union_error = _union_mismatch_plan(writer_schema, reader_schema)
+                        sub = union_error
             else:
                 sub = _build_plan(idx_schema, None, named_schemas, options, memo)
             branches.append(sub)
@@ -1457,7 +1475,7 @@ cdef object _exec_plan(Cursor c, ReadPlan p):
                     f"{p.reader_schema['name']}, known symbols: {p.reader_schema['symbols']}"
                 )
     else:  # K_ERROR
-        raise SchemaResolutionError(p.error_message)
+        raise SchemaResolutionError(_error_message(p))
 
     if p.logical_fn is not None:
         return p.logical_fn(data, p.writer_schema, p.reader_schema)
@@ -1520,7 +1538,7 @@ cdef int _skip_plan(Cursor c, ReadPlan p) except -1:
                     _skip_plan(c, p.child)
             block_count = _c_read_long(c)
     elif kind == K_ERROR:
-        raise SchemaResolutionError(p.error_message)
+        raise SchemaResolutionError(_error_message(p))
     return 0
 
 

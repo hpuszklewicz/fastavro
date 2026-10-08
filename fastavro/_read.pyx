@@ -1041,6 +1041,7 @@ cdef class ReadPlan:
     cdef object errors_obj               # handle_unicode_errors
     cdef const char* errors              # NULL means "strict"
     cdef object error_message            # K_ERROR
+    cdef object error_exception          # K_ERROR: a compile error, raised again
 
 
 
@@ -1065,10 +1066,27 @@ cdef ReadPlan _union_mismatch_plan(writer_schema, reader_schema):
     return p
 
 
-cdef object _error_message(ReadPlan p):
+cdef ReadPlan _deferred_error_plan(exception):
+    cdef ReadPlan p = ReadPlan()
+    p.kind = K_ERROR
+    p.error_exception = exception
+    return p
+
+
+cdef object _plan_error(ReadPlan p):
+    """The exception an error node raises: a fresh copy of a deferred compile
+    error, or a SchemaResolutionError."""
+    if p.error_exception is not None:
+        e = p.error_exception
+        try:
+            return type(e)(*e.args)
+        except Exception:
+            return e
     if p.error_message is not None:
-        return p.error_message
-    return f"schema mismatch: {p.writer_schema} not found in {p.reader_schema}"
+        return SchemaResolutionError(p.error_message)
+    return SchemaResolutionError(
+        f"schema mismatch: {p.writer_schema} not found in {p.reader_schema}"
+    )
 
 
 cdef str _branch_name(idx_schema, idx_reader_schema, named_schemas, bint use_reader_lookup):
@@ -1082,6 +1100,22 @@ cdef str _branch_name(idx_schema, idx_reader_schema, named_schemas, bint use_rea
 
 
 cdef ReadPlan _build_plan(
+    object writer_schema,
+    object reader_schema,
+    dict named_schemas,
+    dict options,
+    dict memo,
+):
+    """Compile one schema node. If that fails, the node raises the same error
+    when a datum reaches it, which is when the generic reader raises it: a
+    union branch that no datum takes never fails."""
+    try:
+        return _compile_node(writer_schema, reader_schema, named_schemas, options, memo)
+    except Exception as e:
+        return _deferred_error_plan(e)
+
+
+cdef ReadPlan _compile_node(
     object writer_schema,
     object reader_schema,
     dict named_schemas,
@@ -1111,48 +1145,55 @@ cdef ReadPlan _build_plan(
         plan = ReadPlan()
         memo[key] = plan
         plan.kind = K_RECORD
-        field_names = []
-        field_plans = []
-        if reader_schema is None:
-            for field in writer_schema["fields"]:
-                field_names.append(field["name"])
-                field_plans.append(_build_plan(field["type"], None, named_schemas, options, memo))
-        else:
-            readers_field_dict = {}
-            aliases_field_dict = {}
-            for f in reader_schema["fields"]:
-                readers_field_dict[f["name"]] = f
-                for alias in f.get("aliases", []):
-                    aliases_field_dict[alias] = f
-            for field in writer_schema["fields"]:
-                readers_field = readers_field_dict.get(
-                    field["name"], aliases_field_dict.get(field["name"])
-                )
-                if readers_field:
-                    field_names.append(readers_field["name"])
-                    field_plans.append(_build_plan(
-                        field["type"], readers_field["type"], named_schemas, options, memo
-                    ))
-                    del readers_field_dict[readers_field["name"]]
-                else:
-                    field_names.append(None)
+        try:
+            field_names = []
+            field_plans = []
+            if reader_schema is None:
+                for field in writer_schema["fields"]:
+                    field_names.append(field["name"])
                     field_plans.append(_build_plan(field["type"], None, named_schemas, options, memo))
-            default_names = []
-            default_values = []
-            for f_name, field in readers_field_dict.items():
-                if "default" in field:
-                    default_names.append(field["name"])
-                    default_values.append(field["default"])
-                else:
-                    plan.missing_default_error = (
-                        f"No default value for field {field['name']} in {reader_schema['name']}"
+            else:
+                readers_field_dict = {}
+                aliases_field_dict = {}
+                for f in reader_schema["fields"]:
+                    readers_field_dict[f["name"]] = f
+                    for alias in f.get("aliases", []):
+                        aliases_field_dict[alias] = f
+                for field in writer_schema["fields"]:
+                    readers_field = readers_field_dict.get(
+                        field["name"], aliases_field_dict.get(field["name"])
                     )
-                    break
-            if default_names:
-                plan.default_names = default_names
-                plan.default_values = default_values
-        plan.field_names = field_names
-        plan.field_plans = field_plans
+                    if readers_field:
+                        field_names.append(readers_field["name"])
+                        field_plans.append(_build_plan(
+                            field["type"], readers_field["type"], named_schemas, options, memo
+                        ))
+                        del readers_field_dict[readers_field["name"]]
+                    else:
+                        field_names.append(None)
+                        field_plans.append(_build_plan(field["type"], None, named_schemas, options, memo))
+                default_names = []
+                default_values = []
+                for f_name, field in readers_field_dict.items():
+                    if "default" in field:
+                        default_names.append(field["name"])
+                        default_values.append(field["default"])
+                    else:
+                        plan.missing_default_error = (
+                            f"No default value for field {field['name']} in {reader_schema['name']}"
+                        )
+                        break
+                if default_names:
+                    plan.default_names = default_names
+                    plan.default_values = default_values
+            plan.field_names = field_names
+            plan.field_plans = field_plans
+        except Exception as e:
+            # Recursive references compiled meanwhile already point at this
+            # plan: turn it into the error node itself.
+            plan.kind = K_ERROR
+            plan.error_exception = e
+            return plan
 
     elif record_type == "null":
         plan = ReadPlan()
@@ -1475,7 +1516,7 @@ cdef object _exec_plan(Cursor c, ReadPlan p):
                     f"{p.reader_schema['name']}, known symbols: {p.reader_schema['symbols']}"
                 )
     else:  # K_ERROR
-        raise SchemaResolutionError(_error_message(p))
+        raise _plan_error(p)
 
     if p.logical_fn is not None:
         return p.logical_fn(data, p.writer_schema, p.reader_schema)
@@ -1538,7 +1579,7 @@ cdef int _skip_plan(Cursor c, ReadPlan p) except -1:
                     _skip_plan(c, p.child)
             block_count = _c_read_long(c)
     elif kind == K_ERROR:
-        raise SchemaResolutionError(_error_message(p))
+        raise _plan_error(p)
     return 0
 
 

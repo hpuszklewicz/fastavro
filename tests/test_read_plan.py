@@ -525,3 +525,52 @@ def test_union_plan_size_does_not_grow_with_incompatible_branches():
     tracemalloc.stop()
     assert message_reader.read(b"\x00") == {"u": None}
     assert held < 1024 * 1024
+
+
+def defer_schemas(recursive):
+    # Two writer fields aliased to one reader field: the generic reader raises
+    # KeyError when it reads such a record, and only then.
+    def schemas(last_fields):
+        back = {
+            "type": "record",
+            "name": "B",
+            "fields": [{"name": "back", "type": ["null", "A"]}],
+        }
+        first = [{"name": "x", "type": ["null", back]}] if recursive else []
+        a = {"type": "record", "name": "A", "fields": first + last_fields}
+        top = {
+            "type": "record",
+            "name": "Top",
+            "fields": [{"name": "u", "type": ["null", a]}],
+        }
+        return fastavro.parse_schema(top)
+
+    writer = schemas([{"name": "a", "type": "int"}, {"name": "b", "type": "int"}])
+    reader = schemas([{"name": "c", "type": "int", "aliases": ["a", "b"]}])
+    record = b"\x02" + (b"\x00" if recursive else b"") + b"\x02\x04"
+    return writer, reader, record
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+def test_compile_errors_are_raised_when_a_datum_reaches_them(recursive):
+    writer, reader, record = defer_schemas(recursive)
+    for payload in (b"\x00", record):
+        plan, generic = (
+            with_plan(
+                enabled,
+                lambda: outcome(
+                    lambda: fastavro.schemaless_reader(BytesIO(payload), writer, reader)
+                ),
+            )
+            for enabled in (True, False)
+        )
+        assert plan == generic
+    assert generic == ("err", KeyError)
+    message_reader = fastavro.read.MessageReader(writer, reader)
+    assert message_reader.read(b"\x00") == {"u": None}
+    errors = []
+    for _ in range(2):
+        with pytest.raises(KeyError) as error:
+            message_reader.read(record)
+        errors.append(error.value)
+    assert errors[0] is not errors[1]

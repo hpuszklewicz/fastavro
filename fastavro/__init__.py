@@ -41,7 +41,7 @@ Example usage::
 """
 
 __version_info__ = (1, 13, 1)
-__version__ = "%s.%s.%s" % __version_info__
+__version__ = "%s.%s.%s+readplan.1" % __version_info__
 
 
 import fastavro.read

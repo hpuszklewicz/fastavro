@@ -1,7 +1,6 @@
 import datetime
 import os
 import random
-import tracemalloc
 import uuid
 from decimal import Decimal
 from io import BytesIO
@@ -12,6 +11,9 @@ import fastavro
 from fastavro.read import SchemaResolutionError, _read
 
 from .test_read_behaviour import outcome
+
+# PyPy has no tracemalloc; these tests are for the compiled reader only anyway.
+tracemalloc = pytest.importorskip("tracemalloc")
 
 pytestmark = pytest.mark.skipif(
     not hasattr(_read, "CYTHON_MODULE"), reason="compiled read plans are Cython-only"

@@ -265,3 +265,13 @@ def test_entries_leaving_the_cache_are_released_outside_its_lock(path):
         timeout=60,
     )
     assert out.stdout.strip() == "done", out.stderr
+
+
+def test_top_level_primitive_schemas_use_the_generic_reader():
+    # For a single primitive value the generic reader is faster than a plan.
+    previous = fastavro.read.set_schemaless_plan_cache_size(0)  # start empty
+    fastavro.read.set_schemaless_plan_cache_size(previous)
+    assert (
+        fastavro.schemaless_reader(BytesIO(b"\x02"), fastavro.parse_schema("long")) == 1
+    )
+    assert fastavro.read.schemaless_plan_cache_info()["size"] == 0

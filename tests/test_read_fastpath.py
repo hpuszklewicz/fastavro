@@ -4,7 +4,6 @@ import random
 import subprocess
 import sys
 import threading
-import tracemalloc
 from io import BytesIO
 
 import pytest
@@ -13,6 +12,9 @@ import fastavro
 from fastavro.read import LOGICAL_READERS, _read
 
 from .test_read_behaviour import outcome, record_schema
+
+# PyPy has no tracemalloc; these tests are for the compiled reader only anyway.
+tracemalloc = pytest.importorskip("tracemalloc")
 
 pytestmark = [
     pytest.mark.skipif(

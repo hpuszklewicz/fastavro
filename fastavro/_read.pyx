@@ -2006,11 +2006,12 @@ cpdef schemaless_reader(
 
     # Fast path: the input is in memory and the schemas were already parsed
     # (so the compiled plan can be cached by identity across calls).  Any
-    # other input keeps the generic reader.
+    # other input keeps the generic reader, including BytesIO subclasses,
+    # whose read() may differ from the buffer it is read from here.
     if (
         _READ_PLAN_ENABLED
         and read_plan
-        and isinstance(fo, BytesIO)
+        and type(fo) is BytesIO
         and parsed_writer_schema is writer_schema
         and (parsed_reader_schema is None or parsed_reader_schema is reader_schema)
     ):

@@ -526,6 +526,15 @@ def test_schemaless_reader_accepts_any_file_like_object():
     assert fastavro.schemaless_reader(Stream(data), schema) == {"s": "abc", "n": 5}
 
 
+def test_schemaless_reader_uses_the_read_method_of_a_bytesio_subclass():
+    class Shifted(BytesIO):
+        def read(self, n=-1):
+            return bytes(b - 4 for b in super().read(n))
+
+    schema = fastavro.parse_schema(record_schema("R", [{"name": "x", "type": "int"}]))
+    assert fastavro.schemaless_reader(Shifted(b"\x06"), schema) == {"x": 1}
+
+
 def test_schemaless_reader_parsed_and_unparsed_schemas_agree():
     schema = record_schema("R", [{"name": "n", "type": "int"}])
     data = schemaless_bytes(schema, {"n": 4})

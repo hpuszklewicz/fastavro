@@ -46,8 +46,8 @@ reader sometimes returned data (see the changelog).
 
 To switch back to the previous reader, for example to compare results:
 
-* set ``FASTAVRO_READ_PLAN=0`` in the environment before ``fastavro`` is
-  imported, or
+* set ``FASTAVRO_READ_PLAN=0`` (or ``false``, ``no``, ``off``) in the
+  environment before ``fastavro`` is imported, or
 * call ``fastavro.read.set_read_plan_enabled(False)``
   (``read_plan_enabled()`` reports the current state), or
 * for a single reader, pass ``read_plan=False`` to ``reader``,

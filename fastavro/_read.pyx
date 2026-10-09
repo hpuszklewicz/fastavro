@@ -38,10 +38,32 @@ from .const import NAMED_TYPES, AVRO_TYPES
 
 CYTHON_MODULE = 1  # Tests check this to confirm whether using the Cython code.
 
+
+def _env_flag(name, default):
+    """An on/off setting from the environment, read at import time. A value
+    that cannot be understood warns and keeps the default: a typo in a
+    deployment's settings must not stop the application from importing
+    fastavro, nor be read as the opposite of what was meant."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    if value.lower() in ("1", "true", "yes", "on"):
+        return True
+    if value.lower() in ("0", "false", "no", "off"):
+        return False
+    warn(
+        f"ignoring {name}={value!r}: expected 1, true, yes or on, "
+        "or 0, false, no or off",
+        RuntimeWarning,
+    )
+    return default
+
+
 # Compiled read plans (see "Fast decoding path" below) can be switched off,
-# e.g. to compare against the generic reader: FASTAVRO_READ_PLAN=0 in the
-# environment at import time, or set_read_plan_enabled(False) at runtime.
-_READ_PLAN_ENABLED = os.environ.get("FASTAVRO_READ_PLAN", "1") != "0"
+# e.g. to compare against the generic reader: FASTAVRO_READ_PLAN=0 (or false,
+# no, off) in the environment at import time, or set_read_plan_enabled(False)
+# at runtime.
+_READ_PLAN_ENABLED = _env_flag("FASTAVRO_READ_PLAN", True)
 
 
 def set_read_plan_enabled(enabled):

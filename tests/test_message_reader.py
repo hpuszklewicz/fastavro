@@ -1,6 +1,7 @@
 import copy
 import pickle
 import random
+import threading
 from io import BytesIO
 
 import pytest
@@ -18,22 +19,24 @@ from .test_read_behaviour import (
     outcome,
     record_schema,
     schemaless_bytes,
+    strict,
 )
 
 
-def assert_same_as_schemaless(data, writer, reader=None, **options):
-    # Callers pass unparsed schemas, so schemaless_reader takes the generic path
-    # and MessageReader is compared against independent code.
+def assert_same_as_schemaless(data, writer, reader=None, corrupt=False, **options):
+    # schemaless_reader is the previous reader; MessageReader uses a read plan.
     expected = outcome(
         lambda: fastavro.schemaless_reader(BytesIO(data), writer, reader, **options)
     )
     got = outcome(lambda: MessageReader(writer, reader, **options).read(data))
-    if got == ("err", EOFError):
-        assert expected[1] in (EOFError, IndexError)
-    else:
+    if got[0] == "ok":
+        # Whatever MessageReader returns is exactly what schemaless_reader
+        # returns: the same values, types and key order at every level.
+        assert expected[0] == "ok" and strict(got[1]) == strict(expected[1])
+    elif not corrupt:
         assert got == expected
-        if got[0] == "ok" and isinstance(got[1], dict):
-            assert list(got[1]) == list(expected[1])
+    # Corrupt or cut-off data always raises with a read plan, where the
+    # previous reader sometimes returns data or raises another error.
     return got
 
 
@@ -124,10 +127,62 @@ def test_matches_schemaless_reader_on_generated_schemas():
     for seed in range(0, N_SEEDS, 2):
         schema, records, _ = make_file(seed, n_records=1)
         data = schemaless_bytes(schema, records[0])
-        assert_same_as_schemaless(data, schema)
         reader, _ = mutate_reader(schema, random.Random(seed))
-        assert_same_as_schemaless(data, schema, reader)
-        assert_same_as_schemaless(data, schema, return_record_name=True)
+        for args, options in [
+            ((schema,), {}),
+            ((schema, reader), {}),
+            ((schema,), {"return_record_name": True}),
+            ((schema,), {"return_named_type": True}),
+        ]:
+            assert_same_as_schemaless(data + b"trailing", *args, **options)
+        for cut in range(len(data)):
+            assert_same_as_schemaless(data[:cut], schema, corrupt=True)
+            assert_same_as_schemaless(data[:cut], schema, reader, corrupt=True)
+
+
+def test_one_reader_shared_by_threads():
+    data = schemaless_bytes(WRITER, WRITER_RECORD)
+    expected = fastavro.schemaless_reader(BytesIO(data), WRITER, READER)
+    reader = MessageReader(WRITER, READER)
+    errors = []
+
+    def work():
+        for _ in range(2000):
+            if strict(reader.read(data)) != strict(expected):
+                errors.append(1)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+@pytest.mark.skipif(
+    not fastavro.read.read_plan_enabled(),
+    reason="the previous reader does not detect these",
+)
+@pytest.mark.parametrize(
+    "writer,reader,payload,expected",
+    [
+        # length -1 in a field the reader drops
+        (
+            [{"name": "skip", "type": "bytes"}, {"name": "x", "type": "int"}],
+            [{"name": "x", "type": "int"}],
+            b"\x01\x02",
+            EOFError,
+        ),
+        # length -1 in a field that is read
+        ([{"name": "s", "type": "string"}], None, b"\x01", EOFError),
+        # 11 continuation bytes cannot encode a 64-bit value
+        ([{"name": "n", "type": "long"}], None, b"\xff" * 11 + b"\x01", ValueError),
+    ],
+)
+def test_corrupt_input_raises(writer, reader, payload, expected):
+    reader_schema = record_schema("R", reader) if reader else None
+    message_reader = MessageReader(record_schema("R", writer), reader_schema)
+    assert outcome(lambda: message_reader.read(payload)) == ("err", expected)
 
 
 @pytest.mark.parametrize(

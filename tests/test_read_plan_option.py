@@ -49,9 +49,6 @@ def corrupt_file():
 
 
 READS = {
-    "schemaless_reader": lambda **kw: fastavro.schemaless_reader(
-        BytesIO(MESSAGE), SCHEMA, **kw
-    ),
     "MessageReader": lambda **kw: MessageReader(SCHEMA, **kw).read(MESSAGE),
     "reader": lambda **kw: next(iter(fastavro.reader(BytesIO(corrupt_file()), **kw))),
     "block_reader": lambda **kw: next(
@@ -86,13 +83,8 @@ def test_read_plan_false_gives_the_same_results_on_valid_data():
     writer, reader = fastavro.parse_schema(WRITER), fastavro.parse_schema(READER)
     payload = schemaless_bytes(WRITER, WRITER_RECORD)
     for read_plan in (True, False):
-        for record in (
-            fastavro.schemaless_reader(
-                BytesIO(payload), writer, reader, read_plan=read_plan
-            ),
-            MessageReader(writer, reader, read_plan=read_plan).read(payload),
-        ):
-            assert record == expected[0] and list(record) == list(expected[0])
+        record = MessageReader(writer, reader, read_plan=read_plan).read(payload)
+        assert record == expected[0] and list(record) == list(expected[0])
 
 
 def test_message_reader_keeps_read_plan_when_copied():

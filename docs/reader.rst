@@ -56,5 +56,9 @@ To switch back to the previous reader, for example to compare results:
   control group of an A/B test. The two settings above still turn read plans
   off everywhere.
 
-Both do nothing on the pure-Python implementation (PyPy), which does not have
-read plans.
+The first two settings apply to the whole process, including other libraries
+that use fastavro: set them once, at startup or as an emergency switch. Code
+that wants the previous reader for itself only should pass ``read_plan=False``.
+
+None of these settings does anything on the pure-Python implementation (PyPy),
+which does not have read plans.

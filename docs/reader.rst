@@ -28,18 +28,17 @@ times faster. It is used by:
 
 * ``reader`` (``iter_avro``) and ``block_reader``: one plan per file, so files
   with only a few records gain little;
-* ``schemaless_reader``: only when it is given an ``io.BytesIO`` (not a
-  subclass) and a record schema that went through ``parse_schema``. Parse the
-  schema once and reuse it; parsing it on every call is slower than before.
-  Treat a parsed schema as read-only once it has been used: its plan is
-  cached, so later changes to it are not seen. To use a changed schema, parse
-  it again. Plans are kept in a cache of 3072 entries. To change its size,
-  set ``FASTAVRO_SCHEMALESS_PLAN_CACHE`` before ``fastavro`` is imported, or
-  call ``fastavro.read.set_schemaless_plan_cache_size()``
-  (``schemaless_plan_cache_info()`` reports the size and capacity);
 * ``MessageReader``: one plan, prepared when it is created, for any schema.
-  Keeping one ``MessageReader`` per schema is the fastest way to decode many
-  messages.
+
+``schemaless_reader`` is unchanged and does not use read plans. To decode
+schemaless messages with one, create a ``MessageReader`` once per schema, for
+example where the parsed schemas are kept now, and call its ``read`` method::
+
+    reader = MessageReader(writer_schema, reader_schema)  # once per schema
+    record = reader.read(payload)  # payload: the message's bytes
+
+For valid data, ``read`` returns exactly what ``schemaless_reader`` returns
+with the same arguments.
 
 For valid data, decoded results and errors are the same as before. For
 corrupt or cut-off data, read plans always raise an error, where the previous
@@ -47,15 +46,19 @@ reader sometimes returned data (see the changelog).
 
 To switch back to the previous reader, for example to compare results:
 
-* set ``FASTAVRO_READ_PLAN=0`` in the environment before ``fastavro`` is
-  imported, or
+* set ``FASTAVRO_READ_PLAN=0`` (or ``false``, ``no``, ``off``) in the
+  environment before ``fastavro`` is imported, or
 * call ``fastavro.read.set_read_plan_enabled(False)``
   (``read_plan_enabled()`` reports the current state), or
-* for a single reader or call, pass ``read_plan=False`` to ``reader``,
-  ``block_reader``, ``schemaless_reader`` or ``MessageReader``. Nothing global
-  changes, so a threaded service can decode some messages each way, for
-  example as the control group of an A/B test. The two settings above still
-  turn read plans off everywhere.
+* for a single reader, pass ``read_plan=False`` to ``reader``,
+  ``block_reader`` or ``MessageReader``. Nothing global changes, so a
+  threaded service can decode some messages each way, for example as the
+  control group of an A/B test. The two settings above still turn read plans
+  off everywhere.
 
-Both do nothing on the pure-Python implementation (PyPy), which does not have
-read plans.
+The first two settings apply to the whole process, including other libraries
+that use fastavro: set them once, at startup or as an emergency switch. Code
+that wants the previous reader for itself only should pass ``read_plan=False``.
+
+None of these settings does anything on the pure-Python implementation (PyPy),
+which does not have read plans.

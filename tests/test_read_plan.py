@@ -1,5 +1,6 @@
 import datetime
 import os
+import pickle
 import random
 import uuid
 from decimal import Decimal
@@ -8,9 +9,9 @@ from io import BytesIO
 import pytest
 
 import fastavro
-from fastavro.read import SchemaResolutionError, _read
+from fastavro.read import MessageReader, SchemaResolutionError, _read
 
-from .test_read_behaviour import outcome
+from .test_read_behaviour import outcome, record_schema
 
 # PyPy has no tracemalloc; these tests are for the compiled reader only anyway.
 tracemalloc = pytest.importorskip("tracemalloc")
@@ -363,50 +364,6 @@ def test_truncation_at_every_offset_matches_generic_reader(seed):
         assert_same(data[:cut])
 
 
-@pytest.mark.parametrize("seed", range(0, N_SEEDS, 2))
-def test_schemaless_reader_matches_generic_reader(seed):
-    schema, records, data = make_file(seed, n_records=1)
-    parsed = fastavro.parse_schema(schema)
-    fo = BytesIO()
-    fastavro.schemaless_writer(fo, parsed, records[0])
-    one = fo.getvalue()
-    reader_schema, expect_error = mutate_reader(schema, random.Random(seed))
-    parsed_reader = fastavro.parse_schema(reader_schema)
-
-    def both(payload, writer, reader=None, **options):
-        def read(stream):
-            return fastavro.schemaless_reader(stream, writer, reader, **options)
-
-        results = []
-        for enabled in (True, False):
-            stream = BytesIO(payload + b"trailing")
-            results.append(
-                (
-                    with_plan(enabled, lambda: outcome(lambda: read(stream))),
-                    stream.tell(),
-                )
-            )
-        (plan, plan_pos), (generic, generic_pos) = results
-        if plan[0] == "ok":
-            assert plan == generic and list(plan[1]) == list(generic[1])
-            assert plan_pos == generic_pos
-        elif plan[1] is EOFError:
-            assert generic[1] in (EOFError, IndexError)
-        else:
-            assert plan == generic
-        return plan, plan_pos
-
-    assert both(one, parsed) == both(one, schema)
-    assert both(one, parsed)[1] == len(one)
-    assert both(one, parsed, parsed_reader) == both(one, schema, reader_schema)
-    if expect_error:
-        assert both(one, parsed, parsed_reader)[0] == ("err", SchemaResolutionError)
-    both(one, parsed, return_record_name=True)
-    both(one, parsed, return_named_type=True)
-    for cut in range(len(one)):
-        both(one[:cut], parsed)
-
-
 def test_memory_is_stable_across_repeated_decodes():
     schema, records, data = make_file(3, n_records=5000)
     tracemalloc.start()
@@ -449,7 +406,7 @@ def test_enum_error_message_matches_generic_reader():
         with pytest.raises(SchemaResolutionError) as error:
             with_plan(
                 enabled,
-                lambda: fastavro.schemaless_reader(BytesIO(b"\x04"), schema, reader),
+                lambda: MessageReader(schema, reader).read(b"\x04"),
             )
         messages.append(str(error.value))
     assert (
@@ -497,7 +454,7 @@ def test_union_mismatch_message_matches_generic_reader(reader_type, payload):
         with pytest.raises(SchemaResolutionError) as error:
             with_plan(
                 enabled,
-                lambda: fastavro.schemaless_reader(BytesIO(payload), writer, reader),
+                lambda: MessageReader(writer, reader).read(payload),
             )
         messages.append(str(error.value))
     assert messages[0] == messages[1]
@@ -560,9 +517,7 @@ def test_compile_errors_are_raised_when_a_datum_reaches_them(recursive):
         plan, generic = (
             with_plan(
                 enabled,
-                lambda: outcome(
-                    lambda: fastavro.schemaless_reader(BytesIO(payload), writer, reader)
-                ),
+                lambda: outcome(lambda: MessageReader(writer, reader).read(payload)),
             )
             for enabled in (True, False)
         )
@@ -578,18 +533,12 @@ def test_compile_errors_are_raised_when_a_datum_reaches_them(recursive):
     assert errors[0] is not errors[1]
 
 
-def test_stream_position_after_a_unicode_error_matches_generic_reader():
-    schema = fastavro.parse_schema(
-        {
-            "type": "record",
-            "name": "R",
-            "fields": [{"name": "s", "type": "string"}, {"name": "n", "type": "int"}],
-        }
+def test_compiled_plans_refuse_to_be_pickled():
+    plan = _read.compile_read_plan(
+        fastavro.parse_schema(record_schema("R", [{"name": "x", "type": "int"}])),
+        {"writer": {}, "reader": {}},
+        None,
+        {},
     )
-    positions = []
-    for enabled in (True, False):
-        fo = BytesIO(b"\x04\xff\xfe\x02")  # a 2-byte string that is not UTF-8
-        with pytest.raises(UnicodeDecodeError):
-            with_plan(enabled, lambda: fastavro.schemaless_reader(fo, schema))
-        positions.append(fo.tell())
-    assert positions == [3, 3]
+    with pytest.raises(TypeError):
+        pickle.dumps(plan)

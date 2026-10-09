@@ -11,7 +11,6 @@ import lzma
 import os
 import sys
 import zlib
-from collections import deque
 from datetime import datetime, timezone
 from decimal import Context
 from functools import partial
@@ -39,10 +38,32 @@ from .const import NAMED_TYPES, AVRO_TYPES
 
 CYTHON_MODULE = 1  # Tests check this to confirm whether using the Cython code.
 
+
+def _env_flag(name, default):
+    """An on/off setting from the environment, read at import time. A value
+    that cannot be understood warns and keeps the default: a typo in a
+    deployment's settings must not stop the application from importing
+    fastavro, nor be read as the opposite of what was meant."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    if value.lower() in ("1", "true", "yes", "on"):
+        return True
+    if value.lower() in ("0", "false", "no", "off"):
+        return False
+    warn(
+        f"ignoring {name}={value!r}: expected 1, true, yes or on, "
+        "or 0, false, no or off",
+        RuntimeWarning,
+    )
+    return default
+
+
 # Compiled read plans (see "Fast decoding path" below) can be switched off,
-# e.g. to compare against the generic reader: FASTAVRO_READ_PLAN=0 in the
-# environment at import time, or set_read_plan_enabled(False) at runtime.
-_READ_PLAN_ENABLED = os.environ.get("FASTAVRO_READ_PLAN", "1") != "0"
+# e.g. to compare against the generic reader: FASTAVRO_READ_PLAN=0 (or false,
+# no, off) in the environment at import time, or set_read_plan_enabled(False)
+# at runtime.
+_READ_PLAN_ENABLED = _env_flag("FASTAVRO_READ_PLAN", True)
 
 
 def set_read_plan_enabled(enabled):
@@ -1610,149 +1631,6 @@ def _decode_block_records(bytes block_bytes, long64 count, ReadPlan plan):
         yield _exec_plan(c, plan)
 
 
-cdef object _read_one_from_bytesio(fo, ReadPlan plan):
-    """Decode one datum from a BytesIO at its current position and advance
-    the position past it (or past the bytes consumed before an error).
-
-    getvalue() shares the buffer of an unmodified BytesIO; getbuffer() would
-    export a writable view and force a copy of the whole buffer first."""
-    cdef bytes data = fo.getvalue()
-    cdef Cursor c = _cursor_for_bytes(data)
-    c.pos = fo.tell()
-    try:
-        return _exec_plan(c, plan)
-    finally:
-        fo.seek(c.pos)
-
-
-# (writer_schema, reader_schema, options) -> plan, keyed by object identity.
-# Entries keep references to the schema objects so an id cannot be reused by
-# a different object while it is cached.  Parsed schemas are assumed not to
-# change once used (the documentation says so): their contents are not
-# checked again.  When full, the oldest entry is evicted.  Each entry also
-# records the LOGICAL_READERS function (or None) of every logical type in the
-# plan, so replacing, removing or registering a reader invalidates the entry
-# on its next use, as the generic reader would see the change immediately.
-#
-# _SCHEMALESS_ORDER holds the keys in insertion order, so evicting the oldest
-# entry is O(1): next(iter(dict)) walks past every slot already deleted from
-# the front of the dict.  Keys removed by an invalidation stay in it until
-# they reach the front, and it is rebuilt from the dict when it grows past
-# twice the dict's size.  Each entry stores the key object it was inserted
-# with, and eviction only removes an entry whose stored key *is* the popped
-# one: a leftover key can equal a newer key (ids are reused once a schema is
-# freed) and must not evict it.  The dict and the deque are only used while
-# holding _SCHEMALESS_LOCK: without a GIL, a dict lookup returns a borrowed
-# reference that a concurrent delete could free.
-cdef dict _SCHEMALESS_PLANS = {}
-cdef object _SCHEMALESS_ORDER = deque()
-cdef cython.pymutex _SCHEMALESS_LOCK
-cdef Py_ssize_t _SCHEMALESS_PLANS_MAX = int(
-    os.environ.get("FASTAVRO_SCHEMALESS_PLAN_CACHE", "3072")
-)
-
-
-# Nothing that can run Python code of its own may happen under
-# _SCHEMALESS_LOCK: freeing an entry can call a finalizer (of a logical
-# reader, say), and allocating a container object can start a garbage
-# collection that calls others; either may use this cache and would wait for
-# the lock forever. Removed entries are therefore collected in a list and
-# released after the lock, and nothing is allocated under it beyond the dict
-# and deque storage.
-
-
-cdef _evict_to(Py_ssize_t size, list removed):
-    """Evict the oldest entries until at most `size` remain (lock held)."""
-    while len(_SCHEMALESS_PLANS) > size and _SCHEMALESS_ORDER:
-        key = _SCHEMALESS_ORDER.popleft()
-        entry = _SCHEMALESS_PLANS.get(key)
-        if entry is not None and entry[4] is key:
-            removed.append(entry)
-            del _SCHEMALESS_PLANS[key]
-
-
-cdef _remember(key):
-    """Record a newly inserted key (lock held)."""
-    cdef Py_ssize_t i
-    _SCHEMALESS_ORDER.append(key)
-    if len(_SCHEMALESS_ORDER) > 2 * len(_SCHEMALESS_PLANS) + 64:
-        # drop the keys left by invalidations, in place and in order
-        for i in range(len(_SCHEMALESS_ORDER)):
-            k = _SCHEMALESS_ORDER.popleft()
-            entry = _SCHEMALESS_PLANS.get(k)
-            if entry is not None and entry[4] is k:
-                _SCHEMALESS_ORDER.append(k)
-
-
-def set_schemaless_plan_cache_size(size):
-    """Set the number of compiled schemaless plans kept; returns the old size."""
-    global _SCHEMALESS_PLANS_MAX
-    cdef list removed = []
-    size = max(0, int(size))
-    with _SCHEMALESS_LOCK:
-        previous = _SCHEMALESS_PLANS_MAX
-        _SCHEMALESS_PLANS_MAX = size
-        _evict_to(size, removed)
-    return previous
-
-
-def schemaless_plan_cache_info():
-    return {"size": len(_SCHEMALESS_PLANS), "capacity": _SCHEMALESS_PLANS_MAX}
-
-
-cdef dict _logical_readers_used(ReadPlan plan, dict out, set seen):
-    """{logical type: function, or None if none was registered} for every
-    logical type in the plan tree, for cache validation: replacing, removing
-    or registering a reader invalidates the plan."""
-    if plan is None or id(plan) in seen:
-        return out
-    seen.add(id(plan))
-    if isinstance(plan.writer_schema, dict) and "logicalType" in plan.writer_schema:
-        out[extract_logical_type(plan.writer_schema)] = plan.logical_fn
-    _logical_readers_used(plan.child, out, seen)
-    for sub in plan.branches or ():
-        _logical_readers_used(<ReadPlan>sub, out, seen)
-    for sub in plan.field_plans or ():
-        _logical_readers_used(<ReadPlan>sub, out, seen)
-    return out
-
-
-cdef ReadPlan _schemaless_plan(writer_schema, reader_schema, dict named_schemas, dict options):
-    cdef ReadPlan plan
-    key = (
-        id(writer_schema),
-        _ref_key(reader_schema),
-        options["return_record_name"],
-        options["return_record_name_override"],
-        options["handle_unicode_errors"],
-        options["return_named_type"],
-        options["return_named_type_override"],
-    )
-    with _SCHEMALESS_LOCK:
-        entry = _SCHEMALESS_PLANS.get(key)
-        if entry is not None and entry[0] is writer_schema and entry[1] is reader_schema:
-            for logical_key, fn in <list>entry[3]:
-                if LOGICAL_READERS.get(logical_key) is not fn:
-                    break
-            else:
-                return <ReadPlan>entry[2]
-            del _SCHEMALESS_PLANS[key]  # `entry` keeps it alive past the lock
-    plan = _build_plan(writer_schema, reader_schema, named_schemas, options, {})
-    if _SCHEMALESS_PLANS_MAX <= 0:
-        return plan
-    used = list(_logical_readers_used(plan, {}, set()).items())
-    entry = (writer_schema, reader_schema, plan, used, key)
-    removed = []
-    with _SCHEMALESS_LOCK:
-        _evict_to(_SCHEMALESS_PLANS_MAX - 1, removed)
-        replaced = _SCHEMALESS_PLANS.get(key)  # inserted by another thread meanwhile
-        if replaced is not None:
-            removed.append(replaced)
-        _SCHEMALESS_PLANS[key] = entry
-        _remember(key)
-    return plan
-
-
 def _iter_avro_records(
     fo,
     header,
@@ -2036,18 +1914,16 @@ cpdef schemaless_reader(
     handle_unicode_errors="strict",
     return_named_type=False,
     return_named_type_override=False,
-    bint read_plan=True,
 ):
     if writer_schema == reader_schema:
         # No need for the reader schema if they are the same
         reader_schema = None
 
     named_schemas = _default_named_schemas()
-    parsed_writer_schema = parse_schema(writer_schema, named_schemas["writer"])
+    writer_schema = parse_schema(writer_schema, named_schemas["writer"])
 
-    parsed_reader_schema = None
     if reader_schema:
-        parsed_reader_schema = parse_schema(reader_schema, named_schemas["reader"])
+        reader_schema = parse_schema(reader_schema, named_schemas["reader"])
 
     options = {
         "return_record_name": return_record_name,
@@ -2056,29 +1932,6 @@ cpdef schemaless_reader(
         "return_named_type": return_named_type,
         "return_named_type_override": return_named_type_override,
     }
-
-    # Fast path: the input is in memory and the schemas were already parsed
-    # (so the compiled plan can be cached by identity across calls).  Any
-    # other input keeps the generic reader, including BytesIO subclasses,
-    # whose read() may differ from the buffer it is read from here, and
-    # top-level primitive schemas, for which the generic reader is faster.
-    if (
-        _READ_PLAN_ENABLED
-        and read_plan
-        and type(fo) is BytesIO
-        and type(writer_schema) is dict
-        and parsed_writer_schema is writer_schema
-        and (parsed_reader_schema is None or parsed_reader_schema is reader_schema)
-    ):
-        return _read_one_from_bytesio(
-            fo,
-            _schemaless_plan(
-                parsed_writer_schema, parsed_reader_schema, named_schemas, options
-            ),
-        )
-
-    writer_schema = parsed_writer_schema
-    reader_schema = parsed_reader_schema
     return _read_data(
         fo,
         writer_schema,
@@ -2098,12 +1951,15 @@ cdef class MessageReader:
         reader = MessageReader(parsed_writer_schema)
         record = reader.read(payload)
 
-    Behaviour is identical to ``schemaless_reader(BytesIO(payload), ...)``
-    with the same arguments: same values, same key order, same exceptions,
-    raised at the same point (schema resolution errors on the first ``read``
-    that hits them, not in the constructor).  Trailing bytes after the datum
-    are ignored, as ``schemaless_reader`` ignores them.  An instance is
-    immutable after construction and safe to share between threads.
+    For valid data, ``read`` returns exactly what
+    ``schemaless_reader(BytesIO(payload), ...)`` returns with the same
+    arguments: the same values, types and key order, and the same schema
+    resolution errors, raised on the first ``read`` that hits them (not in the
+    constructor).  Corrupt or cut-off data always raises an error, where
+    ``schemaless_reader`` sometimes returns data (see the changelog).
+    Trailing bytes after the datum are ignored, as ``schemaless_reader``
+    ignores them.  An instance is immutable after construction and safe to
+    share between threads.
 
     ``LOGICAL_READERS`` functions are bound when the instance is built; build
     a new instance to pick up a replacement.  If the compiled read plans are

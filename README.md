@@ -7,11 +7,11 @@
 
 This fork adds *compiled read plans* to fastavro: on CPython, decoding is
 usually 3-5x faster (see "Compiled read plans" in [docs/reader.rst](docs/reader.rst)).
-The preview is version `1.13.1+readplan.2`: official fastavro 1.13.1 plus read
+The preview is version `1.13.1+readplan.3`: official fastavro 1.13.1 plus read
 plans. It is not an official fastavro release.
 
 Prebuilt wheels for CPython 3.11 to 3.15 on Linux, macOS and Windows are on the
-[`readplan-preview-2` release](https://github.com/hpuszklewicz/fastavro/releases/tag/readplan-preview-2),
+[`readplan-preview-3` release](https://github.com/hpuszklewicz/fastavro/releases/tag/readplan-preview-3),
 so there is nothing to compile.
 
 ### 1. Install
@@ -19,7 +19,7 @@ so there is nothing to compile.
 To try it without changing your project, run your code with:
 
 ```sh
-uv run --with "fastavro==1.13.1+readplan.2" --find-links https://github.com/hpuszklewicz/fastavro/releases/expanded_assets/readplan-preview-2 python your_script.py
+uv run --with "fastavro==1.13.1+readplan.3" --find-links https://github.com/hpuszklewicz/fastavro/releases/expanded_assets/readplan-preview-3 python your_script.py
 ```
 
 Or, to use it in a uv project, add this to its `pyproject.toml` and run
@@ -29,7 +29,7 @@ from PyPI. To go back, delete these lines and run `uv sync` again.
 ```toml
 [[tool.uv.index]]
 name = "fastavro-preview"
-url = "https://github.com/hpuszklewicz/fastavro/releases/expanded_assets/readplan-preview-2"
+url = "https://github.com/hpuszklewicz/fastavro/releases/expanded_assets/readplan-preview-3"
 format = "flat"
 explicit = true
 
@@ -37,46 +37,51 @@ explicit = true
 fastavro = { index = "fastavro-preview" }
 ```
 
-`fastavro.__version__` is `1.13.1+readplan.2` when the preview is in use.
+`fastavro.__version__` is `1.13.1+readplan.3` when the preview is in use.
 
-### 2. Decode messages with `schemaless_reader`
+### 2. Decode messages with `MessageReader`
+
+`schemaless_reader` is unchanged: it is the official reader. To decode
+schemaless messages with a read plan, create a `MessageReader` once per schema
+and call its `read` method:
 
 ```python
 from io import BytesIO
 
 import fastavro
+from fastavro.read import MessageReader
 
-schema = fastavro.parse_schema(
-    {
-        "type": "record",
-        "name": "Event",
-        "fields": [
-            {"name": "id", "type": "long"},
-            {"name": "name", "type": "string"},
-        ],
-    }
-)  # parse once, at startup, and reuse
+schema = {
+    "type": "record",
+    "name": "Event",
+    "fields": [
+        {"name": "id", "type": "long"},
+        {"name": "name", "type": "string"},
+    ],
+}
 
 # An example message
 buf = BytesIO()
-fastavro.schemaless_writer(buf, schema, {"id": 1, "name": "a"})
+fastavro.schemaless_writer(buf, fastavro.parse_schema(schema), {"id": 1, "name": "a"})
 payload = buf.getvalue()
 
-record = fastavro.schemaless_reader(BytesIO(payload), schema)
+reader = MessageReader(schema)  # once per schema
+record = reader.read(payload)  # was: fastavro.schemaless_reader(BytesIO(payload), schema)
 ```
 
-`schemaless_reader` uses read plans when the schema is a record schema from
-`parse_schema`, reused across calls (parsing it on every call is slower than
-the official release), and the input is a plain `io.BytesIO`. Otherwise it uses
-the previous reader.
-
-For many messages with one schema, `MessageReader` is the fastest:
+With a reader schema, use `MessageReader(writer_schema, reader_schema)`; other
+options of `schemaless_reader` go to the constructor too. If your application
+already keeps parsed schemas by id, keep a `MessageReader` per id instead:
 
 ```python
-from fastavro.read import MessageReader
+readers = {}  # schema id -> MessageReader
 
-reader = MessageReader(schema)  # once
-record = reader.read(payload)
+
+def decode(schema_id, payload: bytes) -> dict:
+    reader = readers.get(schema_id)
+    if reader is None:
+        reader = readers[schema_id] = MessageReader(writer_schema(schema_id), reader_schema(schema_id))
+    return reader.read(payload)
 ```
 
 Files read with `fastavro.reader` or `block_reader` use read plans
@@ -84,23 +89,27 @@ automatically.
 
 ### 3. Compare with the previous reader
 
-The preview keeps the previous reader: `read_plan=False` uses it for one call,
-so you can compare results and timings in the same process:
+For valid data, `MessageReader` returns exactly what `schemaless_reader`
+returns: the same values, types and key order. Corrupt or cut-off messages
+always raise an error, where `schemaless_reader` sometimes returns data, so
+catch errors broadly (`except Exception`) where you handle bad messages.
 
 ```python
-new = fastavro.schemaless_reader(BytesIO(payload), schema)
-old = fastavro.schemaless_reader(BytesIO(payload), schema, read_plan=False)
+new = MessageReader(schema).read(payload)
+old = fastavro.schemaless_reader(BytesIO(payload), schema)
 assert new == old
 ```
 
-`read_plan=False` also works with `reader`, `block_reader` and `MessageReader`.
-To turn read plans off everywhere, set `FASTAVRO_READ_PLAN=0`.
+`MessageReader(schema, read_plan=False)` uses the previous reader, for example
+as the control group of an A/B test; `read_plan=False` also works with `reader`
+and `block_reader`. To turn read plans off everywhere, set
+`FASTAVRO_READ_PLAN=0`.
 
 No wheel for your platform? This builds the preview from source instead (needs
 a C compiler):
 
 ```sh
-uv run --with "fastavro @ git+https://github.com/hpuszklewicz/fastavro@readplan-preview-2" python your_script.py
+uv run --with "fastavro @ git+https://github.com/hpuszklewicz/fastavro@readplan-preview-3" python your_script.py
 ```
 
 > [!IMPORTANT]

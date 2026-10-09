@@ -1,3 +1,4 @@
+import datetime
 import pickle
 from io import BytesIO
 
@@ -29,6 +30,19 @@ def outcome(fn):
         return ("ok", fn())
     except Exception as e:  # noqa: BLE001
         return ("err", type(e))
+
+
+def strict(value):
+    """A value's fingerprint for exact comparison: == ignores dict key order
+    and type differences such as 1 == 1.0 == True or Decimal("1.0") ==
+    Decimal("1.00"); this keeps both, at every level."""
+    if type(value) is dict:
+        return ("dict", [(k, strict(v)) for k, v in value.items()])
+    if type(value) in (list, tuple):
+        return (type(value).__name__, [strict(v) for v in value])
+    if type(value) is datetime.datetime:
+        return ("datetime", value.isoformat(), repr(value.tzinfo))
+    return (type(value).__qualname__, repr(value))
 
 
 WRITER = record_schema(

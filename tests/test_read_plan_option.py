@@ -1,4 +1,7 @@
 import copy
+import sys
+import subprocess
+import os
 from io import BytesIO
 
 import pytest
@@ -49,9 +52,6 @@ def corrupt_file():
 
 
 READS = {
-    "schemaless_reader": lambda **kw: fastavro.schemaless_reader(
-        BytesIO(MESSAGE), SCHEMA, **kw
-    ),
     "MessageReader": lambda **kw: MessageReader(SCHEMA, **kw).read(MESSAGE),
     "reader": lambda **kw: next(iter(fastavro.reader(BytesIO(corrupt_file()), **kw))),
     "block_reader": lambda **kw: next(
@@ -86,16 +86,53 @@ def test_read_plan_false_gives_the_same_results_on_valid_data():
     writer, reader = fastavro.parse_schema(WRITER), fastavro.parse_schema(READER)
     payload = schemaless_bytes(WRITER, WRITER_RECORD)
     for read_plan in (True, False):
-        for record in (
-            fastavro.schemaless_reader(
-                BytesIO(payload), writer, reader, read_plan=read_plan
-            ),
-            MessageReader(writer, reader, read_plan=read_plan).read(payload),
-        ):
-            assert record == expected[0] and list(record) == list(expected[0])
+        record = MessageReader(writer, reader, read_plan=read_plan).read(payload)
+        assert record == expected[0] and list(record) == list(expected[0])
 
 
 def test_message_reader_keeps_read_plan_when_copied():
     reader = copy.deepcopy(MessageReader(SCHEMA, read_plan=False))
     assert reader.read_plan is False
     assert outcome(lambda: reader.read(MESSAGE)) == PREVIOUS_READER
+
+
+@pytest.mark.skipif(
+    not hasattr(fastavro.read._read, "set_read_plan_enabled"),
+    reason="compiled read plans are Cython-only",
+)
+@pytest.mark.parametrize(
+    "setting,enabled,warns",
+    [
+        (None, True, False),
+        ("", True, False),
+        ("1", True, False),
+        ("true", True, False),
+        ("On", True, False),
+        ("0", False, False),
+        (" 0", False, False),
+        ("false", False, False),
+        ("False", False, False),
+        ("no", False, False),
+        ("OFF", False, False),
+        ("maybe", True, True),
+        ("0.0", True, True),
+    ],
+)
+def test_environment_variable(setting, enabled, warns):
+    # It is read when fastavro is imported: check in a new process.
+    env = {k: v for k, v in os.environ.items() if k != "FASTAVRO_READ_PLAN"}
+    if setting is not None:
+        env["FASTAVRO_READ_PLAN"] = setting
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import fastavro.read as r; print(r.read_plan_enabled())",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.strip() == str(enabled)
+    assert ("FASTAVRO_READ_PLAN" in out.stderr) == warns
